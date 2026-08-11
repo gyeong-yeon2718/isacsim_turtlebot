@@ -156,7 +156,7 @@ class SimulationRunner:
         self.cams_true = perturbed_cameras(self.s.cameras, self.s.detection, self.rng)
         self.detector = TagDetectorSim(self.cams_true, self.tags, self.s.detection, self.rng)
 
-        self.glow = CoilGlow(self.board_scene)
+        self.glow = CoilGlow(self.board_scene, wpt=self.s.wpt, board=self.s.board)
         self.glow.all_off()
         self.glow.set_target(self.run.target_coil)
         return handles
@@ -243,6 +243,14 @@ class SimulationRunner:
         w = self.robot.get_wheel_velocities()
         return self.s.robot.wheels_to_body(float(w[0]), float(w[1]))
 
+    def _after_control(self, dt: float) -> None:
+        """Extension point, called once per control step after the wheels are commanded.
+
+        No-op here.  The pick-and-place runner uses it to push the arm's joint angles into
+        the rig and to carry the payload, which has to happen at the control rate and after
+        the mission has decided what the arm should be doing.
+        """
+
     def wheel_slip(self, commanded_v: float) -> float:
         """Fraction of commanded forward speed that the chassis is *not* achieving.
 
@@ -303,6 +311,7 @@ class SimulationRunner:
             believed = compose(self.estimator.pose, (offset[0], offset[1], 0.0))
             self.status = self.mission.step(believed, dt)
             self.command(self.status.v, self.status.w)
+            self._after_control(dt)
 
             if self.status.finished:
                 self.finished = True
@@ -312,11 +321,16 @@ class SimulationRunner:
         errors = self.mission.coil_errors(true_coil_pose)
         self.link_state = self.truth_link.update(step_size, *errors)
         if self.glow is not None and self.status is not None:
-            self.glow.update(
+            # Every coil, from the receiver's true position -- so the coil the robot starts on
+            # glows before it moves, and one it crosses on a diagonal route lights up as it
+            # passes.  Lighting only the target made the other three look broken.
+            self.glow.update_all(
+                (true_coil_pose[0], true_coil_pose[1]),
                 self.run.target_coil,
                 self.link_state,
-                energised=self.status.energised or self.status.state in ("VERIFY", "SETTLE"),
-                believed_locked=self.status.state == CHARGING,
+                energised=self.status.energised or CHARGING in str(self.status.state)
+                or "VERIFY" in str(self.status.state) or "SETTLE" in str(self.status.state),
+                believed_locked=CHARGING in str(self.status.state),
                 time=self.t,
             )
 
@@ -387,7 +401,49 @@ class SimulationRunner:
             f"  estimator error at the end: {est_err[0] * 1000:+.2f}, {est_err[1] * 1000:+.2f} mm, "
             f"{math.degrees(est_err[2]):+.3f} deg   ({self.estimator.summary()})"
         )
+        lines.extend(self.plausibility_check())
         lines.append("-" * 78)
+        return "\n".join(lines)
+
+    # -- simulation-only sanity gate -----------------------------------------
+
+    def plausibility_check(self) -> list[str]:
+        """Refuse to let a physically impossible run report success.
+
+        This exists because one did.  A collision launched the robot off the board and through
+        the floor at t = 9 s, it froze there, and the mission still printed ``CHARGING`` --
+        because with no tag in any camera the estimator had nothing to correct against, so it
+        coasted on wheel odometry that kept turning, and odometry said it had arrived.  Every
+        number the mission logic can see was self-consistent.  The only thing that could have
+        caught it was ground truth, and nothing was looking at ground truth.
+
+        So this does, and it is deliberately a *ground-truth* check rather than a cleverer
+        estimator: it is asking "is this simulation still simulating the thing I asked about",
+        which is a question only the simulator can answer.  The real-hardware analogue is not
+        this function -- it is a watchdog on "claiming alignment while no tag has been seen for
+        N seconds", which is the transferable half of the same idea and is noted in the README
+        as unimplemented.
+        """
+        out: list[str] = []
+        x, y, _ = self.true_pose()
+        board = self.s.board
+        ox, oy = board.stage_origin
+        w, h = board.stage_size
+        # A generous box: the robot legitimately drives into the margin outside the coils, and
+        # legitimately retreats.  Half a metre past the plywood edge is not legitimate.
+        pad = 0.50
+        z = float(self.robot.get_world_pose()[0][2])
+        faults: list[str] = []
+        if not (ox - pad <= x <= ox + w + pad and oy - pad <= y <= oy + h + pad):
+            faults.append(f"the robot is off the board at ({x:+.3f}, {y:+.3f}) m")
+        if not (-0.05 <= z <= 0.25):
+            faults.append(f"the robot's base is at z = {z:+.3f} m, which is not on the floor")
+        if faults:
+            out.append("  !! IMPLAUSIBLE RUN -- the result above is not trustworthy:")
+            out.extend(f"     - {f}" for f in faults)
+            out.append("     A collision has moved the robot somewhere it cannot drive to. "
+                       "Fix the scene, not the controller.")
+        return out
         return "\n".join(lines)
 
     def write_log(self) -> None:

@@ -46,10 +46,24 @@ BEACON_PEAK = 90000.0
 
 
 class CoilGlow:
-    """Drives the board's lights from the *true* link state."""
+    """Drives the board's lights from the *true* link state.
 
-    def __init__(self, scene: BoardScene) -> None:
+    **Every** coil is lit from its own coupling, not just the mission's target.  That is
+    both what a bench of energised pads actually does and what makes the run readable: the
+    coil the robot starts on glows before it moves, a coil it drives across on a diagonal
+    route lights up as it passes and fades as it leaves, and the destination comes up as it
+    arrives.  Lighting only the target made the other three look broken.
+
+    Note for fidelity: on the real rig a relay closes for one selected transmitter at a
+    time, so a hardware-faithful scene would light exactly one.  This is the "all pads live"
+    configuration, which is the more informative of the two -- and the target is still
+    distinguished, by its core marker and by the step change at lock.
+    """
+
+    def __init__(self, scene: BoardScene, wpt=None, board=None) -> None:
         self.scene = scene
+        self.wpt = wpt
+        self.board = board
         self.target: int | None = None
         self._last_target: int | None = None
 
@@ -60,8 +74,39 @@ class CoilGlow:
         self._last_target = coil
         for n, visual in self.scene.coils.items():
             set_display_colour(visual.core_prim, (0.15, 0.45, 0.95) if n == coil else _FERRITE)
-            if n != coil:
+
+    def update_all(
+        self,
+        rx_xy: tuple[float, float],
+        target: int,
+        target_link: LinkState,
+        *,
+        energised: bool,
+        believed_locked: bool,
+        time: float = 0.0,
+    ) -> None:
+        """Light every coil from the receiver's distance to it.
+
+        ``rx_xy`` is the receiver coil's true position on the board, so each transmitter is
+        driven by the coupling it would really deliver.  Non-target coils get the same colour
+        ramp but never the lock step change -- that decision belongs to the mission.
+        """
+        self.set_target(target)
+        self.update(target, target_link, energised=energised,
+                    believed_locked=believed_locked, time=time)
+        if self.wpt is None or self.board is None:
+            return
+        for n, (cx, cy) in self.board.coil_positions.items():
+            if n == target:
+                continue
+            offset = math.hypot(rx_xy[0] - cx, rx_xy[1] - cy)
+            rel = self.wpt.relative_efficiency(offset)
+            if rel <= 0.02:
                 self._darken(n)
+                continue
+            self._paint(self.scene.coils[n], glow_colour(rel, False), rel,
+                        glow_intensity(rel, False, standby=STANDBY_INTENSITY,
+                                      peak=PEAK_INTENSITY))
 
     def _darken(self, coil: int) -> None:
         visual = self.scene.coils[coil]
@@ -105,14 +150,16 @@ class CoilGlow:
                 # rather than as a static prop.
                 intensity *= 0.80 + 0.20 * (0.5 + 0.5 * math.sin(time * 6.0))
 
-        rel = min(1.0, max(0.0, link.relative))
+        self._paint(visual, colour, min(1.0, max(0.0, link.relative)), intensity)
+
+    def _paint(self, visual, colour, rel: float, intensity: float) -> None:
         visual.lamp_intensity.Set(float(intensity))
         visual.lamp_colour.Set(tuple(float(c) for c in colour))
         set_display_colour(visual.face_prim, colour)
         if visual.material is not None:
-            # Squared, so the last few millimetres of alignment produce most of the
-            # visible change.  A linear ramp spends its brightness on the part of the
-            # approach where nothing is decided yet.
+            # Squared, so the last few millimetres of alignment produce most of the visible
+            # change.  A linear ramp spends its brightness on the part of the approach where
+            # nothing is decided yet.
             visual.material.set_emission(colour, EMISSIVE_BASE + EMISSIVE_PEAK * rel * rel)
 
         if visual.beacon_material is not None:
