@@ -18,6 +18,23 @@ TurtleBot3를 이동시키고, `/odom`으로 근처까지 접근한 뒤 **AprilT
 
 ## 실행 방법
 
+> **창이 안 뜬다면 `--headless`를 붙였기 때문입니다.** 그 플래그는 "창 없이 계산만 하고 숫자만
+> 출력"이라는 뜻이고, 시뮬레이션을 보는 방법이 아닙니다. 빼면 뷰포트가 뜹니다.
+>
+> ```bash
+> cd C:\Users\user\.claude\turtlebot_isacsim && C:\isaacsim\python.bat run_pick_and_place.py
+> ```
+>
+> `QUIET`(기본 켜짐)이 deprecation 경고는 없앱니다. 다만 **`[ext: ...] startup` 목록은
+> 못 없앱니다** — Kit이 carb 로그 시스템 밖에서 stdout에 직접 찍어서 로그 레벨 설정이 닿지
+> 않습니다(실측: 켜도 끄도 콘솔 427줄). 콘솔을 깨끗하게 보려면 리다이렉트가 답입니다:
+>
+> ```bash
+> C:\isaacsim\python.bat run_pick_and_place.py > run.log 2>&1
+> ```
+>
+> 결과만 보려면 `run.log`의 마지막 20줄을 보면 됩니다.
+
 ### A. Isaac Sim GUI에서 (요청하신 방식)
 
 ```bash

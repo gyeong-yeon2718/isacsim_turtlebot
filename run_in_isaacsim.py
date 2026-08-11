@@ -10,7 +10,7 @@ A) From the Isaac Sim GUI  (this is the flow you asked for)
 
 2. Window > Script Editor, then paste these two lines and press Ctrl+Enter:
 
-       p = r"C:\Users\user\Documents\인턴소프트웨어\isaacsim_wpt\run_in_isaacsim.py"
+       p = r"C:\Users\user\.claude\turtlebot_isacsim\run_in_isaacsim.py"
        exec(compile(open(p, encoding="utf-8").read(), p, "exec"))
 
    Passing the path to ``compile`` sets ``__file__``, so the script finds its own
@@ -60,7 +60,15 @@ import sys
 START_COIL = 1
 TARGET_COIL = 4
 SEED = 20260811
+
+# HEADLESS means "no window at all -- compute the answer and print it".  It is the fast way
+# to get numbers and it is NOT how you watch the simulation.  Leave it False (or simply omit
+# --headless) to get a viewport.
 HEADLESS = False
+# Kit prints ~200 lines of extension startup and deprecation notices before anything of ours
+# appears.  QUIET drops its console level to errors so the output is the mission.  The log
+# file still gets everything.  Pass --verbose to see it all.
+QUIET = True
 # How long to keep the window open after the mission ends, then close.  The window
 # closing is not a crash: standalone mode owns the app and shuts it down on purpose.
 # Pass --hold=600 to linger, or run from the GUI Script Editor, which never closes.
@@ -70,7 +78,7 @@ LOG_PATH: str | None = None
 # Only used if the script cannot work out its own location (a bare ``exec`` in the
 # Script Editor with no ``__file__``).  Prefer the two-line launcher above, which
 # sets ``__file__`` for you and makes this irrelevant.
-FALLBACK_PROJECT_DIR = r"C:\Users\user\Documents\인턴소프트웨어\isaacsim_wpt"
+FALLBACK_PROJECT_DIR = r"C:\Users\user\.claude\turtlebot_isacsim"
 
 # The user's printed parts.  Project-local copies first so the scene keeps working
 # if the originals are moved or cleaned out of Downloads.
@@ -176,16 +184,26 @@ if not IN_GUI:
     _hold = _take_arg("hold", None)
     HOLD_SECONDS = float(_hold) if isinstance(_hold, str) else HOLD_SECONDS
 
+    if _take_arg("verbose", False) is not False:
+        QUIET = False
+
     if NEED_SIMULATION_APP:
         from isaacsim import SimulationApp  # noqa: E402 -- must precede every isaacsim import
 
-        simulation_app = SimulationApp(
-            {
-                "headless": bool(HEADLESS),   # NOTE: SimulationApp defaults to headless=True
-                "width": 1600,
-                "height": 900,
-            }
-        )
+        _config = {
+            "headless": bool(HEADLESS),   # NOTE: SimulationApp defaults to headless=True
+            "width": 1600,
+            "height": 900,
+        }
+        if QUIET:
+            # Two switches: /log/level silences deprecation warnings, /log/outputStreamLevel
+            # governs the console stream the extension startup list goes to.  The file log
+            # under c:/isaacsim/kit/logs still receives everything.
+            _config["extra_args"] = [
+                "--/log/level=error",
+                "--/log/outputStreamLevel=error",
+            ]
+        simulation_app = SimulationApp(_config)
 
 # --------------------------------------------------------------------------
 # Everything below may import omni / pxr / isaacsim

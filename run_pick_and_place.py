@@ -8,7 +8,7 @@ A) From the Isaac Sim GUI
 
    Window > Script Editor, then:
 
-       p = r"C:\Users\user\Documents\인턴소프트웨어\isaacsim_wpt\run_pick_and_place.py"
+       p = r"C:\Users\user\.claude\turtlebot_isacsim\run_pick_and_place.py"
        exec(compile(open(p, encoding="utf-8").read(), p, "exec"))
 
 B) From the terminal
@@ -49,11 +49,23 @@ import sys
 START_COIL = 1          # pick here
 TARGET_COIL = 4         # place here
 SEED = 20260811
+
+# HEADLESS means "no window at all -- compute the answer and print it".  It is the fast way
+# to get numbers and it is NOT how you watch the simulation.  Leave it False (or simply omit
+# --headless) to get a viewport.
 HEADLESS = False
 HOLD_SECONDS = 25.0
 LOG_PATH: str | None = None
+# Kit prints a few hundred lines before anything of ours appears.  QUIET removes the
+# deprecation warnings, which is the part that is actually noise.
+#
+# Measured, so the claim is not overstated: it does NOT remove the `[ext: ...] startup` list.
+# Those lines are written straight to stdout by Kit's extension manager, outside the carb log
+# system, so no log-level setting touches them -- verified, the console stays at 427 lines
+# either way.  To get a clean console, redirect: `... > run.log` and read the tail.
+QUIET = True
 
-FALLBACK_PROJECT_DIR = r"C:\Users\user\Documents\인턴소프트웨어\isaacsim_wpt"
+FALLBACK_PROJECT_DIR = r"C:\Users\user\.claude\turtlebot_isacsim"
 TOP_PLATE_STL_NAMES = ["top_plate.stl"]
 TOWER_STL_NAMES = ["tier3_battery_box.stl"]
 TOP_PLATE_STL_FALLBACKS = [r"C:\Users\user\Documents\카카오톡 받은 파일\상판 최종 버전.stl"]
@@ -131,12 +143,24 @@ if not IN_GUI:
     _hold = _take_arg("hold", None)
     HOLD_SECONDS = float(_hold) if isinstance(_hold, str) else HOLD_SECONDS
 
+    if _take_arg("verbose", False) is not False:
+        QUIET = False
+
     if NEED_SIMULATION_APP:
         from isaacsim import SimulationApp  # noqa: E402
 
-        simulation_app = SimulationApp(
-            {"headless": bool(HEADLESS), "width": 1600, "height": 900}
-        )
+        _config = {"headless": bool(HEADLESS), "width": 1600, "height": 900}
+        if QUIET:
+            # extra_args is forwarded to Kit's own command line.  Two switches, because they
+            # do different jobs: /log/level silences the deprecation warnings, and
+            # /log/outputStreamLevel is what governs the console stream that the extension
+            # startup list goes to.  The log file under c:/isaacsim/kit/logs still gets
+            # everything, so nothing is actually lost.
+            _config["extra_args"] = [
+                "--/log/level=error",
+                "--/log/outputStreamLevel=error",
+            ]
+        simulation_app = SimulationApp(_config)
 
 # --------------------------------------------------------------------------
 # Everything below may import omni / pxr / isaacsim
