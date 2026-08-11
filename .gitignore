@@ -7,5 +7,10 @@ __pycache__/
 run_*.csv
 
 # The STL copies are the user's own parts; keep them out of version control unless
-# you intend to publish the hardware design with the code.
+# you intend to publish the hardware design with the code.  The recursive pattern matters:
+# `assets/*.stl` alone does not match `assets/arm/*.stl`, so arm parts dropped into the
+# subdirectory would have been committed -- and pushing this repository would have published
+# somebody's hardware.  Removing these lines is a decision, not a tidy-up.
 assets/*.stl
+assets/**/*.stl
+assets/**/*.STL

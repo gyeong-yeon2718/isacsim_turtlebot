@@ -49,6 +49,15 @@ _ROLLER = (0.78, 0.78, 0.80)
 
 STATION_SURFACE_Z = 0.100        # m above the plywood; mid-workspace for the arm
 STATION_FOOTPRINT = (0.070, 0.090)   # m, the drop table's top
+# The conveyor is deliberately short and narrow.  Its footprint is a hard constraint in the
+# placement search -- a line running the whole depth of the board cannot clear the robot's
+# turning circle at both the dock and the route corner, and the first version that tried it put
+# the rear extension plate through the rails.
+CONVEYOR_WIDTH = 0.038               # m, outside the rails
+CONVEYOR_LENGTH = 0.200              # m, along y
+# Height of the plywood above the warehouse floor.  A station the placement search puts outside
+# the board has to stand on the floor, so its legs are this much longer.
+TABLE_TOP_Z = 0.330                  # m
 
 # Where the robot's own safe area ends in x.  A station inside it becomes an obstacle, and this
 # project has no avoidance logic -- there has never been anything to avoid.  Used as a hard
@@ -98,7 +107,8 @@ def _rack(stage, path: str, centre: tuple[float, float], size: tuple[float, floa
         add_box(stage, f"{path}/shelf{i}", (w, d, 0.014), (centre[0], centre[1], z), _SHELF)
 
 
-def _station(stage, path: str, station: Station, footprint: tuple[float, float]) -> None:
+def _station(stage, path: str, station: Station, footprint: tuple[float, float],
+             floor_z: float = 0.0) -> None:
     """A short pedestal with a shelf top, standing on the plywood.
 
     The top is a **collider**: the payload is a real rigid body and rests on it, and is
@@ -106,8 +116,9 @@ def _station(stage, path: str, station: Station, footprint: tuple[float, float])
     is worth naming -- a decorative shelf would let the box fall straight through.
     """
     w, d = footprint
-    add_box(stage, f"{path}/post", (0.030, 0.030, station.surface_z),
-            (station.centre[0], station.centre[1], 0.5 * station.surface_z), _STEEL)
+    post_h = station.surface_z - floor_z
+    add_box(stage, f"{path}/post", (0.030, 0.030, post_h),
+            (station.centre[0], station.centre[1], floor_z + 0.5 * post_h), _STEEL)
     top = add_box(stage, f"{path}/top", (w, d, 0.008),
                   (station.centre[0], station.centre[1], station.surface_z - 0.004), _SHELF,
                   collision=True)
@@ -122,7 +133,8 @@ def _conveyor(
     station: Station,
     *,
     y_span: tuple[float, float],
-    width: float = 0.076,
+    width: float = CONVEYOR_WIDTH,
+    floor_z: float = 0.0,
 ) -> None:
     """A gravity roller conveyor running in ``y``, with the pick point on it.
 
@@ -149,12 +161,15 @@ def _conveyor(
                 (0.010, y1 - y0, rail_h),
                 (cx + sy * half_w, 0.5 * (y0 + y1), top_z - 0.5 * rail_h + 0.004), _STEEL)
 
-    # Legs down to the plywood, at the ends and the middle.
+    # Legs down to whatever it stands on: the plywood, or the warehouse floor if the placement
+    # search had to put it outside the board.
+    leg_top = top_z - rail_h + 0.004
+    leg_h = leg_top - floor_z
     for k, fy in enumerate((0.06, 0.5, 0.94)):
         ly = y0 + (y1 - y0) * fy
         for sy, tag in ((+1, "far"), (-1, "near")):
-            add_box(stage, f"{path}/leg{k}_{tag}", (0.012, 0.012, top_z - rail_h + 0.004),
-                    (cx + sy * half_w, ly, 0.5 * (top_z - rail_h + 0.004)), _STEEL)
+            add_box(stage, f"{path}/leg{k}_{tag}", (0.012, 0.012, leg_h),
+                    (cx + sy * half_w, ly, floor_z + 0.5 * leg_h), _STEEL)
 
     # Rollers: axis along X, tops flush with the surface the payload rests on.
     radius = 0.007
@@ -217,6 +232,10 @@ def best_station_centre(
     surface_z: float,
     x_window: tuple[float, float],
     y_window: tuple[float, float],
+    footprint: tuple[float, float],
+    turn_points: tuple[tuple[float, float], ...] = (),
+    clearance: float = 0.010,
+    base_margin: float = math.radians(15.0),
 ) -> tuple[tuple[float, float], str]:
     """Where in the margin is the grasp best conditioned?  Searched, not guessed.
 
@@ -240,6 +259,26 @@ def best_station_centre(
     point *and* the approach point 60 mm above it have to be inside all three joint ranges.
     ``x`` is pinned to about 20 mm by the first two, which is why the free axis is ``y`` -- and
     why the pick station is a rail running that way rather than a pedestal.
+
+    Two further constraints, both added after a station was placed without them and the robot's
+    rear extension plate ended up inside the conveyor:
+
+    * **Clear the robot's turning circle.**  ``turn_points`` are where the robot rotates -- the
+      coil it docks on and every vertex of its route -- and the station's whole footprint must
+      stay ``obstacle_swept_radius + clearance`` from all of them.  That is deliberately *not*
+      ``swept_radius``: that one is built from the support envelope and answers "does the robot
+      stay on the plywood", where the overhanging parts may hang past the edge because there is
+      nothing out there to hit.  A conveyor is something to hit.  The rear extension puts
+      structure 157.4 mm from the wheel axle; the conveyor's near rail was 93.7 mm from coil 1.
+    * **Leave the base servo some travel.**  A solution sitting exactly on the +-90 degree limit
+      is not a solution: the arm aims from wherever the robot actually parked, so a docking error
+      of a couple of degrees the wrong way makes the target unreachable mid-run.  ``base_margin``
+      reserves that, and the first version of this search returned +90.0 degrees exactly.
+
+    Together these can make the plywood margin infeasible, and at coil 1 they do: requiring
+    clearance from both coil 1 and the route vertex leaves an empty interval.  That is why the
+    caller may pass an ``x_window`` reaching past the board edge -- a floor-standing conveyor
+    alongside the table, which is what a warehouse has anyway.  The returned note says which.
     """
     ox, oy = settings.board.stage_origin
     cx, cy = settings.board.coil_positions[coil]
@@ -250,18 +289,72 @@ def best_station_centre(
     d_opt = math.hypot(arm.l_upper, arm.distal)
     manip_max = arm.l_upper * arm.distal
 
+    hx, hy = footprint
+    r = settings.robot
+    keep_out = r.obstacle_swept_radius + clearance
+    base_limit = min(abs(arm.base_range[0]), abs(arm.base_range[1])) - base_margin
+
+    # The low outline, in body coordinates about the wheel axle.  The 230 mm plate is excluded
+    # for the reason ``obstacle_swept_radius`` gives: it rides above a station this short.
+    rear_x = -(0.5 * r.base_footprint[1] + r.rear_extension)
+    corners = [
+        (rear_x, +0.5 * r.base_footprint[0]), (rear_x, -0.5 * r.base_footprint[0]),
+        (+0.5 * r.base_footprint[1], +0.5 * r.base_footprint[0]),
+        (+0.5 * r.base_footprint[1], -0.5 * r.base_footprint[0]),
+        (0.0, +r.footprint_half_extents[1]), (0.0, -r.footprint_half_extents[1]),
+    ]
+
+    def rect_gap(sx: float, sy: float, px: float, py: float) -> float:
+        """Distance from a point to the station rectangle, so a long conveyor is not a dot."""
+        return math.hypot(max(0.0, abs(px - sx) - hx), max(0.0, abs(py - sy) - hy))
+
+    def clears_every_turn(sx: float, sy: float) -> bool:
+        """Two different tests, because the robot does two different things.
+
+        At a **route vertex** it really turns through 90 degrees, so the whole swept circle has
+        to be clear.  At the coil it **docks** on it does not: it arrives on a heading and holds
+        it, correcting by at most the yaw tolerance and its hand-placement error.  Demanding a
+        full turning circle there is not conservatism, it is a wrong model -- and it is what made
+        the drop table infeasible, because clearing 167 mm and staying inside the arm's 230 mm
+        reach left a band about a millimetre wide.  So the docked coil is checked against the
+        actual oriented outline over a yaw slack, sampled rather than reasoned about.
+        """
+        for px, py in turn_points:
+            if math.hypot(px - cx, py - cy) < 1e-9:
+                continue                                  # the docked coil, handled below
+            if rect_gap(sx, sy, px, py) < keep_out:
+                return False
+        slack = math.radians(12.0)                        # tolerance 4 deg + placement error 3 sigma
+        for k in range(13):
+            th = heading - slack + 2.0 * slack * k / 12
+            ct, st = math.cos(th), math.sin(th)
+            for bx, by in corners:
+                wx = cx + bx * ct - by * st
+                wy = cy + bx * st + by * ct
+                if rect_gap(sx, sy, wx, wy) < clearance:
+                    return False
+        return True
+
     best: tuple[tuple[float, float], float, float, float, float] | None = None
+    rejected = {"clear": 0, "ik": 0, "base": 0}
     x_lo, x_hi = x_window
     y_lo, y_hi = y_window
-    nx = 1 if x_hi <= x_lo else 21
+    nx = 1 if x_hi <= x_lo else 41
     for i in range(nx):
         sx = x_lo if nx == 1 else x_lo + (x_hi - x_lo) * i / (nx - 1)
-        for j in range(161):
-            sy = y_lo + (y_hi - y_lo) * j / 160
+        for j in range(241):
+            sy = y_lo + (y_hi - y_lo) * j / 240
+            if turn_points and not clears_every_turn(sx, sy):
+                rejected["clear"] += 1
+                continue
             grasp = base_frame_target(arm, chassis, plate_top_z, (sx, sy, grasp_z))
             above = base_frame_target(arm, chassis, plate_top_z, (sx, sy, grasp_z + 0.060))
             g, a = solve_ik(arm, grasp), solve_ik(arm, above)
             if not (g.ok and a.ok) or g.pose is None:
+                rejected["ik"] += 1
+                continue
+            if abs(g.pose.base) > base_limit:
+                rejected["base"] += 1
                 continue
             d = math.sqrt(sum(v * v for v in grasp))
             manip = manip_max * abs(math.sin(g.pose.elbow))
@@ -272,17 +365,23 @@ def best_station_centre(
 
     if best is None:
         # Fall back to the middle of the window and say so, rather than silently shipping a
-        # station the arm cannot use.
+        # station the arm cannot use.  The rejection counts say *which* constraint bit, because
+        # "no feasible placement" is useless on its own.
         centre = (0.5 * (x_lo + x_hi), 0.5 * (y_lo + y_hi))
-        return centre, (f"coil {coil}: NO feasible station in the margin window; "
-                        f"fell back to ({centre[0]:+.3f}, {centre[1]:+.3f}) m")
+        return centre, (
+            f"coil {coil}: NO feasible station -- rejected {rejected['clear']} for turning-circle "
+            f"clearance, {rejected['ik']} unreachable, {rejected['base']} on the base servo "
+            f"limit; fell back to ({centre[0]:+.3f}, {centre[1]:+.3f}) m"
+        )
 
     (sx, sy), d, manip, elbow, base = best
+    where = "on the board" if sx - hx >= ox else "floor-standing beside the table"
     return (sx, sy), (
-        f"coil {coil}: station at ({sx:+.4f}, {sy:+.4f}) m -> reach {d * 1000:.1f} mm "
+        f"coil {coil}: station at ({sx:+.4f}, {sy:+.4f}) m {where} -> reach {d * 1000:.1f} mm "
         f"(optimum {d_opt * 1000:.1f}), elbow {math.degrees(elbow):+.1f} deg, "
-        f"base {math.degrees(base):+.1f} of {math.degrees(arm.base_range[1]):.0f} available, "
-        f"manipulability {100.0 * manip / manip_max:.1f} % of maximum"
+        f"base {math.degrees(base):+.1f} of {math.degrees(base_limit):.0f} usable, "
+        f"manipulability {100.0 * manip / manip_max:.1f} % of maximum; "
+        f"clears every turning circle by {keep_out * 1000:.0f} mm"
     )
 
 
@@ -334,32 +433,52 @@ def build_warehouse(
     # Stations placed where the grasp is best conditioned, searched against the real IK inside
     # the only window the layout allows: fully on the plywood and fully clear of the robot's
     # safe area.  Nothing here is a typed-in offset.
+    # Everywhere the robot rotates: the coil it docks on plus every vertex of its route.  A
+    # station has to clear all of them, not just the one it serves -- the conveyor was clipped by
+    # the 90-degree turn at the route corner as well as by the dock itself.
+    turn_points = tuple(
+        [board.coil_positions[source_coil]] + [leg.target for leg in route_plan.legs]
+    )
+
+    conv_half = (0.5 * CONVEYOR_WIDTH, 0.5 * CONVEYOR_LENGTH)
     half_x, half_y = 0.5 * STATION_FOOTPRINT[0], 0.5 * STATION_FOOTPRINT[1]
-    y_window = (oy + half_y, oy + h - half_y)
+    # The pick window reaches 90 mm past the plywood edge: on this board the turning-circle
+    # clearance makes the margin infeasible, so the conveyor stands on the floor alongside.
     pick_centre, pick_note = best_station_centre(
         settings, arm, coil=source_coil, heading=src_heading, plate_top_z=plate_top_z,
         surface_z=STATION_SURFACE_Z,
-        x_window=(ox + half_x, SAFE_AREA_X[0] - half_x), y_window=y_window,
+        x_window=(ox - 0.090, SAFE_AREA_X[0] - conv_half[0]),
+        y_window=(oy - 0.060, oy + h + 0.060),
+        footprint=conv_half, turn_points=turn_points,
     )
     place_centre, place_note = best_station_centre(
         settings, arm, coil=target_coil, heading=dst_heading, plate_top_z=plate_top_z,
         surface_z=STATION_SURFACE_Z,
-        x_window=(SAFE_AREA_X[1] + half_x, ox + w - half_x), y_window=y_window,
+        x_window=(SAFE_AREA_X[1] + half_x, ox + w + 0.090),
+        y_window=(oy - 0.060, oy + h + 0.060),
+        footprint=(half_x, half_y), turn_points=turn_points,
     )
     pick = Station("pick conveyor", pick_centre, STATION_SURFACE_Z)
     place = Station("drop table", place_centre, STATION_SURFACE_Z)
     notes.append("PLACED " + pick_note)
     notes.append("PLACED " + place_note)
 
-    # The pick point is a gravity roller conveyor running the depth of the board -- the free
-    # axis the placement search uses is ``y``, so a line running that way is both what the
-    # geometry wants and what a warehouse would actually have there.
-    _conveyor(stage, f"{root}/pick", pick, y_span=(oy + 0.010, oy + h - 0.010))
-    _station(stage, f"{root}/place", place, STATION_FOOTPRINT)
+    # The pick point is a gravity roller conveyor running in y.  Its legs go down to whatever it
+    # is standing on: the plywood if the search kept it on the board, otherwise the floor.
+    pick_on_board = pick.centre[0] - conv_half[0] >= ox
+    _conveyor(
+        stage, f"{root}/pick", pick,
+        y_span=(pick.centre[1] - conv_half[1], pick.centre[1] + conv_half[1]),
+        width=CONVEYOR_WIDTH,
+        floor_z=0.0 if pick_on_board else -TABLE_TOP_Z,
+    )
+    _station(stage, f"{root}/place", place, STATION_FOOTPRINT,
+             floor_z=0.0 if place.centre[0] + half_x <= ox + w else -TABLE_TOP_Z)
 
-    # Boxes queued further down the line, well clear of the arm's swept path.  Dressing only.
-    for i, fy in enumerate((0.62, 0.72, 0.82)):
-        qy = oy + h * fy
+    # Boxes queued behind the pick point, dressing only.  Placed along the conveyor away from the
+    # robot, and only where the conveyor actually exists now that it is 200 mm long.
+    for i, fy in enumerate((0.62, 0.80)):
+        qy = pick.centre[1] - conv_half[1] + CONVEYOR_LENGTH * fy
         add_box(stage, f"{root}/pick/queued{i}", (PAYLOAD_SIZE,) * 3,
                 (pick.centre[0], qy, STATION_SURFACE_Z + PAYLOAD_HALF), _CRATE)
 
@@ -410,7 +529,7 @@ def build_warehouse(
     )
 
     # --- dressing: floor-standing racks outside the table ------------------
-    floor_z = -0.330
+    floor_z = -TABLE_TOP_Z
     table_x0, table_x1 = ox - 0.05, ox + w + 0.05
     table_y0, table_y1 = oy - 0.05, oy + h + 0.05
     add_box(stage, f"{root}/wall_west", (0.02, 1.60, 1.10), (table_x0 - 0.42, 0.5 * h + oy,

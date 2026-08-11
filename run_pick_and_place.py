@@ -107,6 +107,15 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 
+# Where the robot arm's printed parts go, if you have them.  Drop the STLs from
+# elevenMiles/Robotic_Arm_Seven's ``STL_files/`` in here -- base_slim, base_rotation, lower_arm,
+# upper_arm, gripper_upper_arm, gripper -- and each one replaces its procedural stand-in.  The
+# large base and the pen holders are skipped on purpose; they are not on this build.  Missing
+# files are not an error: every part has a fallback, and the mission never depends on geometry.
+# ``assets/*.stl`` is gitignored, so putting hardware here does not publish it.
+ARM_STL_DIR = os.path.join(PROJECT_DIR, "assets", "arm")
+
+
 def _first_existing(names: list[str], fallbacks: list[str]) -> str | None:
     for name in names:
         p = os.path.join(PROJECT_DIR, "assets", name)
@@ -181,6 +190,7 @@ def _make_runner():
             seed=SEED,
             top_plate_stl=_first_existing(TOP_PLATE_STL_NAMES, TOP_PLATE_STL_FALLBACKS),
             tower_stl=_first_existing(TOWER_STL_NAMES, TOWER_STL_FALLBACKS),
+            arm_stl_dir=ARM_STL_DIR,
             log_path=LOG_PATH,
             verbose=True,
         ),

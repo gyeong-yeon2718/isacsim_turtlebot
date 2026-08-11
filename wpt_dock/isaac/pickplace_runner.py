@@ -27,6 +27,7 @@ class PickPlaceRunner(SimulationRunner):
         self.warehouse: WarehouseScene | None = None
         self.carry: GripperAttachment | None = None
         self.stage = None
+        self._arm_notes: list[str] = []
         self._grasped_at: float | None = None
         self._released_at: float | None = None
 
@@ -45,6 +46,8 @@ class PickPlaceRunner(SimulationRunner):
         self.rig = build_arm(
             stage, handles.chassis_path, self.arm_spec,
             plate_top_local_z=handles.plate_top_z - self.s.robot.wheel_radius,
+            stl_dir=self.run.arm_stl_dir,
+            notes=self._arm_notes,
         )
         # The carry object owns the payload's transform ops, so it has to exist before the
         # payload is positioned.
@@ -57,7 +60,7 @@ class PickPlaceRunner(SimulationRunner):
         # not asking.
         gx, gy, gz = self.warehouse.pick.grasp_point
         self.carry.place_at((gx, gy, gz + 0.001))
-        self._notes = list(handles.notes) + list(self.warehouse.notes)
+        self._notes = list(handles.notes) + list(self.warehouse.notes) + list(self._arm_notes)
         self._notes.extend(workspace_report(self.arm_spec).splitlines())
         return handles
 

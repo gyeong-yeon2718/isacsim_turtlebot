@@ -60,6 +60,10 @@ class RunConfig:
     placement_yaw_sigma: float = math.radians(3.0)
     top_plate_stl: str | None = None
     tower_stl: str | None = None
+    # Directory of the robot arm's printed parts.  Unused by the alignment-only run; the
+    # pick-and-place runner passes it to ``build_arm``, which falls back to procedural geometry
+    # for any part it cannot find.
+    arm_stl_dir: str | None = None
     log_path: str | None = None
     verbose: bool = True
 

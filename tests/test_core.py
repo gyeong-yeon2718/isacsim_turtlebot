@@ -449,6 +449,47 @@ class TestRoutes(unittest.TestCase):
                 point_is_on_board(b, DEFAULTS.robot.swept_radius, x, y), msg=f"turn at coil {coil}"
             )
 
+    def test_obstacle_clearance_is_a_different_radius_from_board_containment(self):
+        """Two radii, two questions, and conflating them put a conveyor through the robot.
+
+        ``swept_radius`` answers "does the robot stay on the plywood" and is correctly built
+        from the *support* envelope, because the overhanging plate has nothing to hit out there.
+        A conveyor standing on the board does have something to hit, so obstacle clearance needs
+        the low structure -- and the rear extension puts that 26 mm further out than a
+        bounding-box half-extent would suggest, because the outline is not centred on the wheel
+        axle it rotates about.
+        """
+        r = DEFAULTS.robot
+        self.assertGreater(r.obstacle_swept_radius, r.swept_radius,
+                           "obstacle clearance cannot be smaller than board containment here")
+
+        # It must reach past the rear structure, which is the binding corner.
+        rear_x = 0.5 * r.base_footprint[1] + r.rear_extension
+        rear_corner = math.hypot(rear_x, 0.5 * r.base_footprint[0])
+        self.assertAlmostEqual(r.obstacle_swept_radius, rear_corner, places=9,
+                               msg="the rear extension corner should be the binding one")
+
+        # hypot(overall_half_extents) is not this quantity, and the interesting part is that it
+        # errs in *both* directions at once, so it cannot be patched into service:
+        #   - it treats the outline as centred on the axle, which hides 26 mm of rear overhang,
+        #   - and it folds in the 230 mm plate, which rides above a low obstacle entirely.
+        # Here the second effect wins and it comes out larger, which would push the station
+        # needlessly far away.  On a robot with a narrower plate the first would win and it
+        # would put a conveyor through the rear extension.  Either way it is the wrong question.
+        centred = math.hypot(*r.overall_half_extents)
+        self.assertNotAlmostEqual(r.obstacle_swept_radius, centred, places=3)
+        self.assertGreater(centred, r.obstacle_swept_radius,
+                           "with a 230 mm plate the bounding box overstates the low outline")
+        plate_corner = math.hypot(0.5 * r.plate_size[0], 0.5 * r.plate_size[1])
+        self.assertLess(plate_corner, r.obstacle_swept_radius,
+                        "the plate is not the binding structure, so excluding it changes nothing"
+                        " about the answer -- only about the reasoning being right")
+
+        # And board containment must still pass at every coil, unchanged by any of this.
+        b = BoardSpec()
+        for coil, (x, y) in b.coil_positions.items():
+            self.assertTrue(point_is_on_board(b, r.swept_radius, x, y), msg=f"turn at coil {coil}")
+
     def test_retreat_room_leaves_an_edge_margin(self):
         b = BoardSpec()
         leg = plan_route(b, 2, 4).legs[-1]

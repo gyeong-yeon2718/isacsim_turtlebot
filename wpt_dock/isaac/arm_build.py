@@ -28,17 +28,189 @@ records the dead ends -- including one claim it stated as fact and had to retrac
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 
 from ..arm import ArmPose, ArmSpec
+from .stl_mesh import add_stl_mesh, try_read
 from .usd_helpers import add_box, add_cylinder, set_display_colour, set_transform
+
+
+def _hide(stage, path: str) -> None:
+    """Make a prim invisible without removing it.
+
+    Visibility is a render-time property, so a hidden stand-in keeps whatever role it had -- the
+    same trick ``robot_build`` uses to keep measured collision boxes working behind the grafted
+    ROBOTIS meshes.
+    """
+    prim = stage.GetPrimAtPath(Sdf.Path(path))
+    if prim and prim.IsValid():
+        imageable = UsdGeom.Imageable(prim)
+        if imageable:
+            imageable.MakeInvisible()
 
 _METAL = (0.72, 0.73, 0.76)
 _SERVO = (0.10, 0.10, 0.12)
 _LINK = (0.88, 0.88, 0.90)
 _JAW = (0.20, 0.22, 0.26)
+_HORN = (0.93, 0.93, 0.95)
+
+# SG90-class micro servo, from the datasheet outline.  These are what the printed brackets are
+# built around, so the bracket dimensions below are derived from them rather than chosen.
+SERVO_BODY = (0.0228, 0.0122, 0.0226)   # m, body without the mounting flanges
+SERVO_FLANGE = (0.0322, 0.0122, 0.0025)  # m, the lugs the bracket bolts through
+SERVO_HORN_R = 0.0058                    # m, output disc radius
+BRACKET_T = 0.0025                       # m, printed wall thickness
+
+
+#: Logical arm part -> the upstream STL stems that provide it, most specific first.
+#:
+#: **The upstream names are inverted relative to this module's, and that is a trap.**
+#: ``elevenMiles/Robotic_Arm_Seven`` names its links by where they sit in the chain read from the
+#: gripper down, so ``lower_arm.stl`` is the *shoulder-to-elbow* segment -- what this module calls
+#: ``upper_link`` -- and ``upper_arm.stl`` is the *elbow-to-gripper* segment, the forearm.  Wiring
+#: them the obvious way round produces an arm with both links present, both the right length, and
+#: the wrong shapes on the wrong joints: nothing throws and no test catches it.
+#:
+#: Worse, ``gripper_upper_arm.stl`` also contains the substring ``upper_arm``.  Matching by
+#: substring alone would hand the wrist bracket to the forearm.  So the primary match is on the
+#: exact stem, and the wrist is resolved before the forearm regardless.
+ARM_STL_STEMS: dict[str, tuple[str, ...]] = {
+    "base": ("base_slim",),                    # the pedestal housing the base servo
+    "turret": ("base_rotation",),              # turntable on the base servo's horn
+    "gripper_bracket": ("gripper_upper_arm",),  # resolved BEFORE fore_link, see above
+    "upper_link": ("lower_arm",),              # shoulder -> elbow, 120 mm  (NOT "upper_arm")
+    "fore_link": ("upper_arm",),               # elbow -> gripper, 120 mm  (NOT "lower_arm")
+    "jaw": ("gripper",),                       # both jaws, probably in one mesh
+}
+
+#: Never loaded even if present.  The user's build omits the large base and the pen holder; the
+#: pen holder ships as two variants, so three files are excluded to honour "those two parts".
+#: The upstream README's own print table lists exactly the six used files plus ``base_large``,
+#: which corroborates that the pen holder is an alternative end effector nobody printed.
+ARM_STL_EXCLUDE: tuple[str, ...] = ("base_large", "pen_holder")
+
+
+def discover_arm_stls(directory: str) -> tuple[dict[str, str], list[str]]:
+    """Map logical arm parts to STL files in ``directory``.  Returns ``(found, notes)``.
+
+    Returns only what it finds.  Every part has a procedural fallback, so a partial set is
+    useful -- the same degradation the printed top plate and the rear rack already have, for the
+    same reason: the mission depends on the numbers in ``config``, never on the geometry.
+
+    Nothing is downloaded here, by design.  Put the files in ``assets/arm/`` and they are picked
+    up; ``assets/*.stl`` is gitignored so the hardware design is not published by pushing.
+    """
+    import glob
+    import os
+
+    found: dict[str, str] = {}
+    notes: list[str] = []
+    # Deduplicated by normalised case: on Windows the two globs match the same files twice, and
+    # the duplicates show up in the build log as every excluded part being listed twice.
+    seen: dict[str, str] = {}
+    for pattern in ("*.stl", "*.STL"):
+        for p in glob.glob(os.path.join(directory, pattern)):
+            seen.setdefault(os.path.normcase(os.path.abspath(p)), p)
+    paths = sorted(seen.values())
+    if not paths:
+        return found, [f"no arm STLs in {directory}; using the procedural parts"]
+
+    def stem(p: str) -> str:
+        base = os.path.basename(p).rsplit(".", 1)[0]
+        return base.lower().replace("-", "_").replace(" ", "_")
+
+    skipped = [p for p in paths if any(bad in stem(p) for bad in ARM_STL_EXCLUDE)]
+    usable = [p for p in paths if p not in skipped]
+    for part, stems in ARM_STL_STEMS.items():
+        for want in stems:
+            hit = next((p for p in usable if stem(p) == want and p not in found.values()), None)
+            if hit is not None:
+                found[part] = hit
+                break
+    notes.append(f"arm STLs: matched {len(found)}/{len(ARM_STL_STEMS)} parts from {directory}")
+    for part in ARM_STL_STEMS:
+        if part not in found:
+            notes.append(f"  {part}: no STL, using the procedural part")
+    if skipped:
+        notes.append("  excluded by request: "
+                     + ", ".join(os.path.basename(p) for p in sorted(skipped)))
+    return found, notes
+
+
+def _servo(stage, path: str, centre: tuple[float, float, float], *, horn_axis: str = "Y",
+           horn_offset: float = 0.0) -> None:
+    """A micro servo: body, mounting flanges, and a round output horn.
+
+    The horn is the part that makes an arm stop looking like a stack of cubes -- it is the one
+    visibly circular feature at every joint, and every joint has one.
+    """
+    add_box(stage, f"{path}/body", SERVO_BODY, centre, _SERVO)
+    add_box(stage, f"{path}/flange", SERVO_FLANGE,
+            (centre[0], centre[1], centre[2] + 0.5 * SERVO_BODY[2] - 0.004), _SERVO)
+    if horn_axis == "Y":
+        hc = (centre[0], centre[1] + horn_offset, centre[2] + 0.5 * SERVO_BODY[2] + 0.002)
+    else:
+        hc = (centre[0], centre[1], centre[2] + 0.5 * SERVO_BODY[2] + 0.002 + horn_offset)
+    add_cylinder(stage, f"{path}/horn", SERVO_HORN_R, 0.0035, hc, _HORN, axis=horn_axis)
+
+
+def _u_bracket(stage, path: str, *, span: float, length: float, height: float,
+               centre: tuple[float, float, float], colour=_LINK, back: bool = True) -> None:
+    """A printed U bracket: two parallel cheeks and, optionally, a back plate joining them.
+
+    This is the shape the whole arm is made of.  ``span`` is the inside distance between the
+    cheeks -- the servo sits in that gap -- so the outside width is ``span + 2 * BRACKET_T`` and
+    the bracket wraps its servo instead of pretending to be a solid block.
+    """
+    cx, cy, cz = centre
+    half = 0.5 * span + 0.5 * BRACKET_T
+    for sy, tag in ((+1, "cheek_p"), (-1, "cheek_n")):
+        add_box(stage, f"{path}/{tag}", (length, BRACKET_T, height),
+                (cx, cy + sy * half, cz), colour)
+    if back:
+        add_box(stage, f"{path}/back", (BRACKET_T, span + 2 * BRACKET_T, height),
+                (cx - 0.5 * length + 0.5 * BRACKET_T, cy, cz), colour)
+
+
+def _jaw(stage, path: str, spec: ArmSpec) -> None:
+    """One finger: a pivot boss, an L-shaped finger, and the flat pad that touches the object.
+
+    The pad is the one part whose dimensions are load bearing rather than cosmetic --
+    ``jaw_pad_thickness`` is what makes the usable gap ``span - 4 mm``, and the grasp angle is
+    computed from it.  So it is taken from the spec, and changing it changes both the picture and
+    the kinematics together.
+    """
+    t = spec.jaw_pad_thickness
+    # Pivot boss at the jaw's own origin, turning about Z with the finger.
+    add_cylinder(stage, f"{path}/pivot", 0.004, 0.010, (0.0, 0.0, 0.0), _JAW, axis="Z")
+    # The finger reaching forward, then the pad facing inward across the gap.
+    add_box(stage, f"{path}/finger", (0.020, t, 0.014), (0.011, 0.0, 0.0), _JAW)
+    add_box(stage, f"{path}/pad", (0.014, t, 0.016), (0.021, 0.0, 0.0), _JAW)
+
+
+def _link_plate(stage, path: str, *, length: float, height: float, thickness: float,
+                centre: tuple[float, float, float], colour=_LINK) -> None:
+    """An arm link: a plate along +X with **rounded ends**, as a printed link is made.
+
+    Axes matter here and getting them wrong is easy: the link runs along its frame's +X, its
+    plate plane is X-Z, and ``thickness`` is the printed wall in **Y**.  The end bosses turn
+    about the joint axis, which for both bending joints is Y -- so they are cylinders about Y
+    with the plate's own height as their diameter.  Putting them about Z instead produces discs
+    lying flat across the arm, which is a different machine.
+
+    The rounding is not decoration: a link pivots on a boss at each end, so the material follows
+    the bolt circle.  A bare box reads as machined stock, which this arm is not.
+    """
+    cx, cy, cz = centre
+    r = 0.5 * height
+    add_box(stage, f"{path}/web", (max(1e-4, length - height), thickness, height),
+            (cx, cy, cz), colour)
+    for sx, tag in ((-1, "boss_near"), (+1, "boss_far")):
+        add_cylinder(stage, f"{path}/{tag}", r, thickness,
+                     (cx + sx * 0.5 * (length - height), cy, cz), colour, axis="Y")
 
 
 @dataclass
@@ -78,12 +250,40 @@ class ArmRig:
         return cache.GetLocalToWorldTransform(stage.GetPrimAtPath(Sdf.Path(self.tcp_path)))
 
 
+#: Parts whose STL replaces the procedural geometry, and where each one goes.
+#:
+#: ``frame`` is which joint frame it is parented to, so a loaded mesh rotates with its joint.
+#: The transforms are *starting points*, not measurements: an STL's origin is wherever the CAD
+#: happened to put it, and none of these files publish a datum.  ``build_arm`` prints each mesh's
+#: measured extent into the build notes -- the same thing ``robot_build`` does for the printed top
+#: plate -- so the offsets can be corrected in one pass once the files are actually present.
+#:
+#: ``jaw`` is absent on purpose.  ``gripper.stl`` is a single 742-triangle mesh that almost
+#: certainly holds *both* fingers, and the fingers have to move independently: the jaw separation
+#: is driven every frame and the grasp angle is a measured quantity, not decoration.  One mesh
+#: cannot be two moving parts, so the procedural pads stay and the file is skipped with a note.
+#: Splitting it into left and right in a mesh editor is what would change that.
+ARM_STL_PLACEMENT: dict[str, dict] = {
+    "base": dict(frame="root", translate=(0.0, 0.0, 0.0), recenter_xy=True, zero_bottom=True),
+    "turret": dict(frame="root", translate=(0.0, 0.0, BRACKET_T + SERVO_BODY[2]),
+                   recenter_xy=True, zero_bottom=True),
+    "upper_link": dict(frame="shoulder", translate=(0.0, 0.0, 0.0),
+                       recenter_xy=False, zero_bottom=False),
+    "fore_link": dict(frame="elbow", translate=(0.0, 0.0, 0.0),
+                      recenter_xy=False, zero_bottom=False),
+    "gripper_bracket": dict(frame="gripper", translate=(0.0, 0.0, 0.0),
+                            recenter_xy=False, zero_bottom=False),
+}
+
+
 def build_arm(
     stage,
     chassis: str,
     spec: ArmSpec,
     *,
     plate_top_local_z: float,
+    stl_dir: str | None = None,
+    notes: list[str] | None = None,
 ) -> ArmRig:
     """Author the arm on the custom top plate.
 
@@ -99,9 +299,16 @@ def build_arm(
     base_rot = xb.AddRotateZOp()
     base_rot.Set(0.0)
 
-    # Base servo block and the rotating turret it drives.
-    add_box(stage, f"{root}/servo_base", (0.023, 0.013, 0.026), (0.0, 0.0, 0.013), _SERVO)
-    add_cylinder(stage, f"{root}/turret", 0.019, 0.008, (0.0, 0.0, 0.030), _METAL)
+    # --- base: a mounting plate, the base servo standing in it, and the turntable ---------
+    # The base plate is the part the user excluded from the build ("base large"), so what is
+    # modelled is the *small* base: a disc footprint just wide enough for the bolt circle.
+    add_cylinder(stage, f"{root}/base_plate", 0.026, BRACKET_T,
+                 (0.0, 0.0, 0.5 * BRACKET_T), _LINK, axis="Z")
+    _servo(stage, f"{root}/base_servo", (0.0, 0.0, BRACKET_T + 0.5 * SERVO_BODY[2]),
+           horn_axis="Z")
+    # Turntable: the disc the whole arm rotates on, riding on the base servo's horn.
+    add_cylinder(stage, f"{root}/turret", 0.021, 0.005,
+                 (0.0, 0.0, BRACKET_T + SERVO_BODY[2] + 0.006), _METAL, axis="Z")
 
     shoulder_path = f"{root}/shoulder"
     sh = UsdGeom.Xform.Define(stage, Sdf.Path(shoulder_path))
@@ -110,11 +317,23 @@ def build_arm(
     xs.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, spec.base_height))
     shoulder_rot = xs.AddRotateYOp()
     shoulder_rot.Set(0.0)
-    add_box(stage, f"{shoulder_path}/servo", (0.023, 0.013, 0.026), (0.0, 0.0, -0.008), _SERVO)
 
-    # Upper arm: a slim beam along +X of the shoulder frame.
-    add_box(stage, f"{shoulder_path}/upper_link", (spec.l_upper, 0.014, 0.022),
-            (0.5 * spec.l_upper, 0.0, 0.0), _LINK)
+    # --- shoulder: a U bracket standing on the turntable, wrapping the shoulder servo ------
+    # The bracket is authored in the *rotating* frame, so it turns with the joint exactly as the
+    # printed part does.  Its cheeks straddle the servo, which is why the gap is the servo's
+    # own width rather than a chosen number.
+    _u_bracket(stage, f"{shoulder_path}/bracket", span=SERVO_BODY[1], length=0.030,
+               height=0.030, centre=(0.004, 0.0, -0.006))
+    _servo(stage, f"{shoulder_path}/servo", (0.0, 0.0, -0.008),
+           horn_axis="Y", horn_offset=0.5 * SERVO_BODY[1] + 0.004)
+
+    # Upper arm: a plate along +X with rounded ends, bolted to the shoulder horn.
+    _link_plate(stage, f"{shoulder_path}/upper_link", length=spec.l_upper, height=0.022,
+                thickness=0.005, centre=(0.5 * spec.l_upper, 0.0, 0.0))
+    # The second cheek, on the far side: a printed arm carries the load in two shear planes,
+    # which is also why the elbow servo ends up sandwiched rather than cantilevered.
+    _link_plate(stage, f"{shoulder_path}/upper_link_far", length=spec.l_upper, height=0.022,
+                thickness=0.005, centre=(0.5 * spec.l_upper, -0.0165, 0.0))
 
     elbow_path = f"{shoulder_path}/elbow"
     el = UsdGeom.Xform.Define(stage, Sdf.Path(elbow_path))
@@ -123,30 +342,44 @@ def build_arm(
     xe.AddTranslateOp().Set(Gf.Vec3d(spec.l_upper, 0.0, 0.0))
     elbow_rot = xe.AddRotateYOp()
     elbow_rot.Set(0.0)
-    add_box(stage, f"{elbow_path}/servo", (0.023, 0.013, 0.026), (0.0, 0.0, 0.0), _SERVO)
-    add_box(stage, f"{elbow_path}/fore_link", (spec.l_fore, 0.012, 0.018),
-            (0.5 * spec.l_fore, 0.0, 0.0), _LINK)
+
+    # --- elbow: servo sandwiched between the upper arm's cheeks, driving the forearm -------
+    _servo(stage, f"{elbow_path}/servo", (0.006, -0.008, 0.0),
+           horn_axis="Y", horn_offset=0.5 * SERVO_BODY[1] + 0.003)
+    _link_plate(stage, f"{elbow_path}/fore_link", length=spec.l_fore, height=0.018,
+                thickness=0.004, centre=(0.5 * spec.l_fore, 0.008, 0.0))
+    _link_plate(stage, f"{elbow_path}/fore_link_far", length=spec.l_fore, height=0.018,
+                thickness=0.004, centre=(0.5 * spec.l_fore, -0.014, 0.0))
 
     grip_path = f"{elbow_path}/gripper"
     gp = UsdGeom.Xform.Define(stage, Sdf.Path(grip_path))
     xg = UsdGeom.Xformable(gp)
     xg.ClearXformOpOrder()
     xg.AddTranslateOp().Set(Gf.Vec3d(spec.l_fore, 0.0, 0.0))
-    add_box(stage, f"{grip_path}/servo", (0.023, 0.013, 0.026), (-0.004, 0.0, 0.0), _SERVO)
+    # --- gripper: servo in a bracket, driving two pivoting jaws -----------------------------
+    _u_bracket(stage, f"{grip_path}/bracket", span=SERVO_BODY[1], length=0.026, height=0.026,
+               centre=(0.002, 0.0, 0.0))
+    _servo(stage, f"{grip_path}/servo", (-0.002, 0.0, 0.0),
+           horn_axis="Y", horn_offset=0.5 * SERVO_BODY[1] + 0.003)
 
+    # Jaw rest separations come from the spec, not from literals.  They used to be authored at
+    # +-0.012 and then immediately overwritten by ``set_pose``, so the numbers in the file said
+    # one thing and the scene showed another; anyone reading them would have inferred a 20 mm
+    # gap that the mechanism never uses.
+    rest_half = 0.5 * spec.gripper_span(spec.gripper_open)
     jaw_l = UsdGeom.Xform.Define(stage, Sdf.Path(f"{grip_path}/jaw_left"))
     jl = UsdGeom.Xformable(jaw_l)
     jl.ClearXformOpOrder()
     jaw_left = jl.AddTranslateOp()
-    jaw_left.Set(Gf.Vec3d(0.0, 0.012, 0.0))
-    add_box(stage, f"{grip_path}/jaw_left/pad", (0.026, 0.004, 0.016), (0.013, 0.0, 0.0), _JAW)
+    jaw_left.Set(Gf.Vec3d(0.0, rest_half, 0.0))
+    _jaw(stage, f"{grip_path}/jaw_left", spec)
 
     jaw_r = UsdGeom.Xform.Define(stage, Sdf.Path(f"{grip_path}/jaw_right"))
     jr = UsdGeom.Xformable(jaw_r)
     jr.ClearXformOpOrder()
     jaw_right = jr.AddTranslateOp()
-    jaw_right.Set(Gf.Vec3d(0.0, -0.012, 0.0))
-    add_box(stage, f"{grip_path}/jaw_right/pad", (0.026, 0.004, 0.016), (0.013, 0.0, 0.0), _JAW)
+    jaw_right.Set(Gf.Vec3d(0.0, -rest_half, 0.0))
+    _jaw(stage, f"{grip_path}/jaw_right", spec)
 
     # The tool centre point: where a grasped object's centre sits.  Between the jaws, out
     # along the forearm.  Everything about carrying and placing is expressed relative to
@@ -158,6 +391,43 @@ def build_arm(
     tcp_path = f"{grip_path}/tcp"
     tcp = UsdGeom.Xform.Define(stage, Sdf.Path(tcp_path))
     set_transform(UsdGeom.Xformable(tcp), (spec.l_tool, 0.0, 0.0), 0.0, None)
+
+    # --- real printed parts, if the user has them ------------------------------------------
+    # Each loaded mesh *replaces* its procedural stand-in: the stand-in is made invisible rather
+    # than deleted, exactly as the robot's collision boxes are, so nothing that referenced it
+    # breaks and the shapes never double up.
+    if stl_dir:
+        frames = {"root": root, "shoulder": shoulder_path, "elbow": elbow_path,
+                  "gripper": grip_path}
+        procedural = {
+            "base": (f"{root}/base_plate",),
+            "turret": (f"{root}/turret",),
+            "upper_link": (f"{shoulder_path}/upper_link", f"{shoulder_path}/upper_link_far"),
+            "fore_link": (f"{elbow_path}/fore_link", f"{elbow_path}/fore_link_far"),
+            "gripper_bracket": (f"{grip_path}/bracket",),
+        }
+        found, stl_notes = discover_arm_stls(stl_dir)
+        if notes is not None:
+            notes.extend(stl_notes)
+        for part, path in found.items():
+            place = ARM_STL_PLACEMENT.get(part)
+            if place is None:
+                if notes is not None:
+                    notes.append(f"  {part}: STL present but not mounted -- see ARM_STL_PLACEMENT")
+                continue
+            data = try_read(path)
+            if data is None:
+                continue
+            mesh_path = f"{frames[place['frame']]}/{part}_stl"
+            add_stl_mesh(
+                stage, mesh_path, data, scale=0.001, translate=place["translate"],
+                colour=_LINK, recenter_xy=place["recenter_xy"],
+                zero_bottom=place["zero_bottom"],
+            )
+            for stand_in in procedural.get(part, ()):
+                _hide(stage, stand_in)
+            if notes is not None:
+                notes.append(f"  {part}: {os.path.basename(path)} -- {data.describe(0.001)}")
 
     rig = ArmRig(
         spec=spec, root=root, base_rot=base_rot, shoulder_rot=shoulder_rot,

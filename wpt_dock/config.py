@@ -189,6 +189,43 @@ class RobotSpec:
         return math.hypot(a, b)
 
     @property
+    def obstacle_swept_radius(self) -> float:
+        """Radius swept by everything low enough to hit a **structure**, not the board edge.
+
+        A different question from ``swept_radius``, and confusing the two put a roller conveyor
+        through the robot's rear extension plate.  ``swept_radius`` asks "does the robot stay on
+        the plywood", and for that the support envelope is right, because the overhanging parts
+        can hang over the edge freely -- there is nothing at those heights to hit.  A conveyor
+        standing on the board *is* something at those heights to hit, so containment logic is
+        the wrong tool and this is the right one.
+
+        Measured about the rotation centre, which for a differential drive is the wheel axle
+        midpoint -- the chassis origin here.  The outline is deliberately **not** treated as
+        centred on it: the rear extension puts structure 141.5 mm behind the axle while the
+        front reaches only 89 mm, so a half-extent of the bounding box would understate the
+        rear corner by 26 mm.  Per corner, at this robot's numbers:
+
+            rear extension  (-0.1415, +-0.069)  ->  157.4 mm   <- binding
+            rear rack       (-0.1415, +-0.060)  ->  153.7 mm
+            front           (+0.0890, +-0.069)  ->  112.6 mm
+            wheels          ( 0.0000, +-0.089)  ->   89.0 mm
+
+        The 230 mm-wide printed plate is excluded on purpose: it sits about 156 mm up, its
+        corner is only 123.9 mm out anyway, and it genuinely does pass over a low obstacle.  An
+        obstacle tall enough to reach the plate would need its own check -- the plate's height is
+        *measured* from the grafted meshes at build time, so it is not a number this spec can
+        carry, and ``build_warehouse`` is where such a check would belong.
+        """
+        rear_x = 0.5 * self.base_footprint[1] + self.rear_extension
+        candidates = [
+            (rear_x, 0.5 * self.base_footprint[0]),
+            (rear_x, 0.5 * self.rack_size[1]),
+            (0.5 * self.base_footprint[1], 0.5 * self.base_footprint[0]),
+            (0.0, self.footprint_half_extents[1]),
+        ]
+        return max(math.hypot(x, y) for x, y in candidates)
+
+    @property
     def max_wheel_rate(self) -> float:
         """Wheel rate that makes *both* published limits reachable.
 
