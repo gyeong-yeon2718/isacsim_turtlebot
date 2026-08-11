@@ -635,13 +635,21 @@ class TestArm(unittest.TestCase):
         convention, so it is worth asserting rather than eyeballing: if the joint sign
         convention were flipped, everything downstream would still look plausible and be
         mirrored.
+
+        Upstream's 12 cm is to the **gripper mount** -- it is a link length, quoted before
+        anything is bolted to the wrist.  ``forward_kinematics`` reports the tool centre point,
+        so the horizontal figure here is ``l_fore + l_tool``.  Asserting against the raw 0.120
+        would be asserting that the tool offset does not exist, which is the bug this
+        distinction was introduced to fix.
         """
         from wpt_dock.arm import HOME, forward_kinematics
 
         tip = forward_kinematics(self.spec, HOME)
-        self.assertAlmostEqual(tip[0], 0.120, places=9)
+        self.assertAlmostEqual(tip[0], self.spec.distal, places=9)      # 0.120 wrist + 0.016 tool
         self.assertAlmostEqual(tip[1], 0.000, places=9)
-        self.assertAlmostEqual(tip[2], 0.120, places=9)
+        self.assertAlmostEqual(tip[2], self.spec.l_upper, places=9)     # upper arm straight up
+        # The published number itself, at the point it was published for.
+        self.assertAlmostEqual(tip[0] - self.spec.l_tool, 0.120, places=9)
 
     def test_ik_inverts_fk_over_the_workspace(self):
         from wpt_dock.arm import forward_kinematics, solve_ik
@@ -738,6 +746,74 @@ class TestArm(unittest.TestCase):
         # 60 deg at 60 deg/s is about a second; assert the order of magnitude so an
         # accidental instantaneous jump would fail.
         self.assertGreater(steps * dt, 0.8)
+
+    def test_carry_path_clears_the_robot_deck(self):
+        """The lift-to-carry move must not drag the payload through the printed plate.
+
+        This is the defect the user saw as "the object goes through the top plate".  Both
+        endpoints of a joint-space move can clear the deck while the arc between them does
+        not, so the whole interpolated path is checked -- and it is checked against the same
+        plate height the build measures.  Going straight from the lift pose to CARRY leaves
+        about -5 mm of clearance, which is why HOME is now in between.
+        """
+        from wpt_dock.arm import CARRY, HOME, ArmPose, path_clearance, solve_ik
+
+        plate_top = 0.1653          # m, as measured by the Isaac build
+        payload_half = 0.0175       # m, half of the 35 mm cube
+
+        # The lift pose above the pick shelf, as the sequence actually solves it.
+        lift = solve_ik(self.spec, (0.014, 0.135, -0.043))
+        self.assertTrue(lift.ok, lift.reason)
+
+        raised = ArmPose(lift.pose.base, HOME.shoulder, HOME.elbow)   # "raise in place"
+        direct = path_clearance(self.spec, lift.pose, CARRY, plate_top, payload_half)
+        staged = min(
+            path_clearance(self.spec, lift.pose, raised, plate_top, payload_half),
+            path_clearance(self.spec, raised, HOME, plate_top, payload_half),
+            path_clearance(self.spec, HOME, CARRY, plate_top, payload_half),
+        )
+        self.assertGreater(staged, 0.010,
+                           f"lift-then-slew must clear the deck, got {staged * 1000:.1f} mm")
+        self.assertGreater(staged, direct,
+                           "staging has to beat the direct move or it is pointless")
+
+    def test_kinematics_solve_for_the_tool_centre_point_not_the_wrist(self):
+        """``forward_kinematics`` must reach the point the USD ``tcp`` prim marks.
+
+        This pins down a defect worth naming: the tool offset existed as a literal in the USD
+        chain and was missing from the kinematics, so the solver aimed the *wrist* at the shelf
+        and the payload centre landed 16 mm further along the forearm.  With the forearm
+        pointing nearly straight down at a shelf, almost all of that went into z, and every
+        box came out 15.4 mm low -- buried in the shelf it was supposed to sit on.  The bias
+        was constant, which is the tell: geometry, not noise.
+
+        The check is that FK's distal reach equals ``l_fore + l_tool``, measured with the arm
+        straight out, plus a round trip through the IK to show the two agree.
+        """
+        from wpt_dock.arm import ArmPose, forward_kinematics, solve_ik
+
+        straight = forward_kinematics(self.spec, ArmPose(0.0, 0.0, 0.0))
+        self.assertAlmostEqual(straight[0], self.spec.l_upper + self.spec.l_fore + self.spec.l_tool,
+                               places=9)
+        self.assertGreater(self.spec.l_tool, 0.0, "a gripper with no tool offset is a wrist")
+
+        # Round trip: a target the place sequence actually uses, reached to sub-micron.
+        for target in ((0.014, 0.135, -0.043), (0.150, 0.0, -0.050), (0.0, 0.170, 0.020)):
+            res = solve_ik(self.spec, target)
+            self.assertTrue(res.ok, f"{target}: {res.reason}")
+            back = forward_kinematics(self.spec, res.pose)
+            for got, want, axis in zip(back, target, "xyz"):
+                self.assertAlmostEqual(got, want, places=9,
+                                       msg=f"{target} {axis}: FK/IK disagree")
+
+    def test_carry_pose_holds_the_payload_above_the_deck(self):
+        from wpt_dock.arm import CARRY, HOME, payload_height
+
+        plate_top = 0.1653
+        for name, pose in (("HOME", HOME), ("CARRY", CARRY)):
+            z = payload_height(self.spec, pose, plate_top)
+            self.assertGreater(z - 0.0175, plate_top + 0.010,
+                               f"{name} holds the payload too low: {z * 1000:.1f} mm")
 
     def test_unreachable_waypoint_fails_the_sequence(self):
         from wpt_dock.arm import ArmSequencer, Waypoint

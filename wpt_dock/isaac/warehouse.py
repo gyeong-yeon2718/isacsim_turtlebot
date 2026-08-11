@@ -174,7 +174,21 @@ def build_warehouse(
     from pxr import Sdf, UsdGeom, UsdPhysics
 
     body = UsdGeom.Xform.Define(stage, Sdf.Path(payload_path))
-    UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
+    rb = UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
+    # Kinematic **from creation**, authored before the simulation starts.
+    #
+    # Three attempts got here.  A dynamic body driven by per-frame transform writes fights the
+    # solver, and adding the shelf collider made that fight visible: an initial overlap of
+    # zero flicked the box off the shelf at t = 0 and it ended up a metre away.  Flipping
+    # ``kinematicEnabled`` at grasp and release does not help, because PhysX does not pick up
+    # that attribute mid-simulation -- which is also why the earlier "release to gravity" only
+    # appeared to work.  A fixed joint to a kinematic anchor crashed PhysX outright.
+    #
+    # So the payload is kinematic for the whole run and its pose is always authored: sitting
+    # on the shelf, tracking the tool centre point while carried, and parked on the pad after
+    # release.  Deterministic and stable.  The cost is stated plainly in
+    # ``GripperAttachment``: the drop is placement, not a gravity settle, and nothing rolls.
+    rb.CreateKinematicEnabledAttr(True)
     UsdPhysics.MassAPI.Apply(body.GetPrim()).CreateMassAttr(PAYLOAD_MASS)
     box = add_box(stage, f"{payload_path}/box", (PAYLOAD_SIZE,) * 3, (0.0, 0.0, 0.0),
                   _PAYLOAD, collision=True)

@@ -54,6 +54,16 @@ class ArmSpec:
     reach_min: float = 0.030         # m, MEASURED (documented usable minimum)
     reach_max: float = 0.230         # m, MEASURED (documented usable maximum)
 
+    # Gripper mount -> the point a held object's centre sits at, along the forearm axis.
+    # DESIGN, and it has to exist: without it the kinematics solve for the *wrist*, while the
+    # thing that has to land on the pad is the payload centre 16 mm further out.  The two
+    # differ by exactly this much along the forearm, and with the forearm pointing nearly
+    # straight down at a shelf that is almost all vertical -- which is how it was found.  Every
+    # place and pick came out 15-16 mm low, burying the box in the shelf, and the bias was
+    # constant because it is geometry and not noise.  It matches the ``tcp`` prim in
+    # ``isaac/arm_build.py``; the two must move together.
+    l_tool: float = 0.016            # m, gripper mount -> tool centre point
+
     # ESTIMATED: neither repository documents the height from the mounting surface to the
     # shoulder pivot.  0.055 m is a typical SG90 base-rotation bracket plus shoulder
     # mount.  It shifts the whole workspace vertically, so measure it if a target ends up
@@ -83,8 +93,18 @@ class ArmSpec:
     gripper_rate: float = math.radians(120.0)   # rad/s
 
     @property
+    def distal(self) -> float:
+        """Elbow -> tool centre point.  The effective second link for FK and IK.
+
+        The forearm and the tool offset are rigidly in line, so the kinematics cannot tell
+        them apart and there is no reason to carry them separately through the solve.  They
+        are separate *inputs* because one is measured and one is a design choice.
+        """
+        return self.l_fore + self.l_tool
+
+    @property
     def max_reach(self) -> float:
-        return self.l_upper + self.l_fore
+        return self.l_upper + self.distal
 
     def gripper_span(self, opening: float) -> float:
         """Jaw separation for a gripper servo angle, for drawing the jaws.
@@ -123,10 +143,14 @@ the arm clear of the downward cameras' field of view."""
 
 
 def forward_kinematics(spec: ArmSpec, pose: ArmPose) -> tuple[float, float, float]:
-    """Gripper tip position relative to the **shoulder pivot**."""
+    """**Tool centre point** relative to the shoulder pivot.
+
+    Not the wrist: this is where a held object's centre goes, which is the point every
+    waypoint in this module is expressed in and the point the USD ``tcp`` prim marks.
+    """
     q_fore = pose.shoulder + pose.elbow          # forearm's absolute elevation
-    r = spec.l_upper * math.cos(pose.shoulder) + spec.l_fore * math.cos(q_fore)
-    z = spec.l_upper * math.sin(pose.shoulder) + spec.l_fore * math.sin(q_fore)
+    r = spec.l_upper * math.cos(pose.shoulder) + spec.distal * math.cos(q_fore)
+    z = spec.l_upper * math.sin(pose.shoulder) + spec.distal * math.sin(q_fore)
     return (r * math.cos(pose.base), r * math.sin(pose.base), z)
 
 
@@ -171,7 +195,7 @@ def solve_ik(spec: ArmSpec, target: tuple[float, float, float], *, elbow_up: boo
     if d < spec.reach_min:
         return IkResult(False, reason=f"target {d * 100:.1f} cm inside the {spec.reach_min * 100:.0f} cm dead zone", reach=d)
 
-    l1, l2 = spec.l_upper, spec.l_fore
+    l1, l2 = spec.l_upper, spec.distal
     cos_alpha = clamp((d * d + l1 * l1 - l2 * l2) / (2.0 * l1 * d), -1.0, 1.0)
     cos_beta = clamp((l1 * l1 + l2 * l2 - d * d) / (2.0 * l1 * l2), -1.0, 1.0)
     alpha = math.acos(cos_alpha)
@@ -239,6 +263,11 @@ class Waypoint:
     joint_target: ArmPose | None = None                      # or go straight to these angles
     gripper: float | None = None                             # or drive the gripper to this
     settle: float = 0.15                                     # s to hold once arrived
+    # Keep the *current* base yaw and apply only the shoulder/elbow of ``joint_target``.
+    # This is what lets the arm lift straight up in its own vertical plane before slewing --
+    # the standard way to leave a shelf without dragging the payload across whatever is beside
+    # it.  Rotating and lifting at the same time is what put the payload through the deck.
+    hold_base: bool = False
 
 
 @dataclass
@@ -300,7 +329,10 @@ class ArmSequencer:
             self.state.message = f"{wp.name}: gripper -> {math.degrees(wp.gripper):.0f} deg"
             return
         if wp.joint_target is not None:
-            self._target = wp.joint_target
+            jt = wp.joint_target
+            self._target = (
+                ArmPose(self.state.pose.base, jt.shoulder, jt.elbow) if wp.hold_base else jt
+            )
         elif wp.world_target is not None and self._ik_context is not None:
             robot_pose, plate_z = self._ik_context
             local = base_frame_target(self.spec, robot_pose, plate_z, wp.world_target)
@@ -370,34 +402,89 @@ class ArmSequencer:
 # ---------------------------------------------------------------------------
 
 
+def payload_height(spec: ArmSpec, pose: ArmPose, plate_top_z: float) -> float:
+    """World z of the carried payload's centre for a joint pose.
+
+    Exists because the sequences below have to be checked against the robot's own deck, not
+    just against reachability.  ``plate_top_z`` is the printed plate's upper surface; the
+    shoulder pivot is ``base_height`` above it.
+    """
+    return plate_top_z + spec.base_height + forward_kinematics(spec, pose)[2]
+
+
+def path_clearance(
+    spec: ArmSpec, a: ArmPose, b: ArmPose, plate_top_z: float, payload_half: float,
+    plate_half: tuple[float, float] = (0.0462, 0.1150), samples: int = 60,
+) -> float:
+    """Smallest gap between the payload's underside and the plate along a joint-space move.
+
+    Only samples where the payload is actually **over** the plate in XY are counted.  The
+    first version of this compared height everywhere, which flagged the perfectly legal pose
+    of reaching down to a shelf beside the robot -- the plate is not above the shelf.  A
+    clearance metric that fires on safe poses is worse than none, because it gets ignored.
+
+    Joint-space interpolation does not move the tip in a straight line, so two endpoints that
+    both clear the deck can still be joined by an arc that does not.  Returns ``inf`` if the
+    move never passes over the plate, and a negative number if the payload goes through it.
+    """
+    worst = math.inf
+    for i in range(samples + 1):
+        t = i / samples
+        pose = ArmPose(
+            a.base + t * (b.base - a.base),
+            a.shoulder + t * (b.shoulder - a.shoulder),
+            a.elbow + t * (b.elbow - a.elbow),
+        )
+        tip = forward_kinematics(spec, pose)
+        x = spec.mount_offset[0] + tip[0]
+        y = spec.mount_offset[1] + tip[1]
+        if abs(x) > plate_half[0] + payload_half or abs(y) > plate_half[1] + payload_half:
+            continue                      # payload is beside the deck, not above it
+        z = plate_top_z + spec.base_height + tip[2]
+        worst = min(worst, z - payload_half - plate_top_z)
+    return worst
+
+
 def pick_sequence(grasp_point: tuple[float, float, float], spec: ArmSpec,
                   approach: float = 0.060) -> list[Waypoint]:
-    """Vertical approach, close, lift, fold for transit.
+    """Vertical approach, close, lift, raise clear of the deck, then fold for transit.
 
     The approach is straight down onto the object.  With three joints the gripper's tilt is
-    whatever the elbow-up solution gives, so "vertical approach" here means the *path* is
+    whatever the elbow-up solution gives, so "vertical approach" means the *path* is
     vertical, not that the jaws are held vertical -- see the module docstring.
+
+    The ``raise clear`` step is not decoration.  Interpolating straight from the lift pose to
+    ``CARRY`` in joint space swings the payload's underside down to about z = 0.160 m while
+    the printed plate's top is at 0.165 m -- so it passed through the deck, which is exactly
+    what it looked like.  Going by way of ``HOME`` keeps the whole arc above the plate, and
+    ``path_clearance`` is the function that checks it rather than trusting the eye.
     """
     above = (grasp_point[0], grasp_point[1], grasp_point[2] + approach)
     return [
         Waypoint("open the gripper", gripper=spec.gripper_open),
         Waypoint("reach above the object", world_target=above, settle=0.2),
-        Waypoint("descend onto the object", world_target=grasp_point, settle=0.3),
-        Waypoint("close the gripper", gripper=spec.gripper_closed, settle=0.3),
+        Waypoint("descend onto the object", world_target=grasp_point, settle=0.35),
+        Waypoint("close the gripper", gripper=spec.gripper_closed, settle=0.4),
         Waypoint("lift", world_target=above, settle=0.2),
+        Waypoint("raise in place", joint_target=HOME, hold_base=True, settle=0.15),
+        Waypoint("slew to centre", joint_target=HOME, settle=0.15),
         Waypoint("fold for transit", joint_target=CARRY, settle=0.2),
     ]
 
 
 def place_sequence(drop_point: tuple[float, float, float], spec: ArmSpec,
                    approach: float = 0.060) -> list[Waypoint]:
-    """Unfold, descend onto the target, release, retract."""
+    """Unfold clear of the deck, descend onto the target, release, retract."""
     above = (drop_point[0], drop_point[1], drop_point[2] + approach)
     return [
         Waypoint("unfold", joint_target=HOME, settle=0.2),
+        # Slew over the deck at HOME elevation, *then* descend.  Same reason as the pick:
+        # combining the yaw and the descent sweeps the payload low across the plate.
+        Waypoint("slew towards the target", world_target=(above[0], above[1], above[2] + 0.070),
+                 settle=0.15),
         Waypoint("reach above the target", world_target=above, settle=0.2),
-        Waypoint("descend to the target", world_target=drop_point, settle=0.3),
-        Waypoint("release", gripper=spec.gripper_open, settle=0.3),
+        Waypoint("descend to the target", world_target=drop_point, settle=0.35),
+        Waypoint("release", gripper=spec.gripper_open, settle=0.4),
         Waypoint("retract", world_target=above, settle=0.2),
         Waypoint("home", joint_target=HOME, settle=0.1),
     ]
@@ -405,7 +492,8 @@ def place_sequence(drop_point: tuple[float, float, float], spec: ArmSpec,
 
 def workspace_report(spec: ArmSpec) -> str:
     lines = [
-        f"cute_arm: links {spec.l_upper * 100:.1f} + {spec.l_fore * 100:.1f} cm, "
+        f"cute_arm: links {spec.l_upper * 100:.1f} + {spec.l_fore * 100:.1f} cm "
+        f"(+{spec.l_tool * 1000:.0f} mm to the tool centre point), "
         f"usable reach {spec.reach_min * 100:.0f}-{spec.reach_max * 100:.0f} cm "
         f"(geometric max {spec.max_reach * 100:.0f} cm)",
         f"  shoulder pivot {spec.base_height * 1000:.0f} mm above the plate, mounted at "

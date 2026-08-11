@@ -349,6 +349,19 @@ def _attach_custom_parts(
             scale=0.001, translate=(0.0, 0.0, local(plate_bottom_z)),
             colour=(0.11, 0.11, 0.12), recenter_xy=True, zero_bottom=True,
         )
+        # A box collider standing in for the plate.  The STL itself stays visual-only -- a
+        # convex decomposition of a honeycombed plate is hundreds of hulls -- but *something*
+        # has to be solid there: without it the carried payload passed straight through the
+        # deck, which is what made the manipulation look like a video rather than a
+        # simulation.  A box is the right approximation because the plate is flat.
+        plate_box = add_box(
+            stage, f"{chassis}/custom_top_plate_collider",
+            (r.plate_size[0], r.plate_size[1], plate_thickness),
+            (0.0, 0.0, local(plate_bottom_z + 0.5 * plate_thickness)),
+            (0.11, 0.11, 0.12), collision=True,
+        )
+        _make_invisible(stage, f"{chassis}/custom_top_plate_collider")
+        notes.append("plate collider added (box approximation; the STL stays visual-only)")
     else:
         notes.append("top plate STL unavailable; using a box of the measured outline")
         add_box(stage, f"{chassis}/custom_top_plate",

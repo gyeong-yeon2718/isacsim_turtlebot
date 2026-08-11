@@ -14,7 +14,7 @@ import math
 from ..arm import ArmSpec, workspace_report
 from ..config import Settings
 from ..pickplace import DONE, FAILED, PICK, PLACE, PickPlaceMission
-from .arm_build import ArmRig, KinematicCarry, build_arm
+from .arm_build import ArmRig, GripperAttachment, build_arm
 from .runner import RunConfig, SimulationRunner
 from .warehouse import WarehouseScene, build_warehouse
 
@@ -25,7 +25,8 @@ class PickPlaceRunner(SimulationRunner):
         self.arm_spec = arm or ArmSpec()
         self.rig: ArmRig | None = None
         self.warehouse: WarehouseScene | None = None
-        self.carry: KinematicCarry | None = None
+        self.carry: GripperAttachment | None = None
+        self.stage = None
         self._grasped_at: float | None = None
         self._released_at: float | None = None
 
@@ -33,6 +34,7 @@ class PickPlaceRunner(SimulationRunner):
 
     def build(self, stage):
         handles = super().build(stage)
+        self.stage = stage
         self.warehouse = build_warehouse(
             stage, self.s, self.arm_spec,
             source_coil=self.run.start_coil, target_coil=self.run.target_coil,
@@ -46,7 +48,8 @@ class PickPlaceRunner(SimulationRunner):
         )
         # The carry object owns the payload's transform ops, so it has to exist before the
         # payload is positioned.
-        self.carry = KinematicCarry(stage, self.warehouse.payload_path)
+        self.carry = GripperAttachment(stage, self.warehouse.payload_path)
+        self.carry.exclude_from_collision_with(handles.prim_path)
         self.carry.place_at(self.warehouse.pick.grasp_point)
         self._notes = list(handles.notes) + list(self.warehouse.notes)
         self._notes.extend(workspace_report(self.arm_spec).splitlines())
@@ -68,6 +71,28 @@ class PickPlaceRunner(SimulationRunner):
                   f"{self.warehouse.pick.grasp_point}, drops on the "
                   f"{self.warehouse.place.name} at {self.warehouse.place.grasp_point}",
                   flush=True)
+
+    # -- diagnostics ---------------------------------------------------------
+
+    def _frame_report(self, label: str) -> None:
+        """Print the chassis and TCP world poses.
+
+        Kept in the code rather than thrown away: the payload ending up a metre from the pad
+        looked like a grasp bug for two runs, and the thing that actually settled it was
+        comparing the chassis' *USD* transform against the pose the controller believed it had.
+        If those two disagree, no amount of arm-side fixing will help.
+        """
+        from pxr import Sdf, Usd, UsdGeom
+
+        assert self.rig is not None and self.handles is not None and self.stage is not None
+        cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+        chassis = self.stage.GetPrimAtPath(Sdf.Path(self.handles.chassis_path))
+        cw = cache.GetLocalToWorldTransform(chassis).ExtractTranslation()
+        tw = self.rig.tcp_world(self.stage).ExtractTranslation()
+        truth = self.true_pose()
+        print(f"  [frame:{label}] chassis USD ({cw[0]:+.4f}, {cw[1]:+.4f}, {cw[2]:+.4f}) "
+              f"TCP USD ({tw[0]:+.4f}, {tw[1]:+.4f}, {tw[2]:+.4f}) "
+              f"chassis physics ({truth[0]:+.4f}, {truth[1]:+.4f})", flush=True)
 
     # -- per control step ----------------------------------------------------
 
@@ -91,12 +116,17 @@ class PickPlaceRunner(SimulationRunner):
             self._grasped_at = self.t
             if self.run.verbose:
                 print(f"  [arm] t={self.t:6.2f}s grasped the payload", flush=True)
+                self._frame_report("grasp")
         elif phase == PLACE and opened and self.carry.held:
             self.carry.release()
             self._released_at = self.t
             if self.run.verbose:
                 print(f"  [arm] t={self.t:6.2f}s released the payload", flush=True)
+                self._frame_report("release")
 
+        # Driven every step, held or not, so the anchor is already at the jaws when the joint
+        # is enabled.  Enabling a fixed joint whose bodies are apart snaps the payload across
+        # the scene.
         self.carry.follow(self.rig)
 
     # -- reporting -----------------------------------------------------------
