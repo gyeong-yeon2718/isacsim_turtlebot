@@ -1,0 +1,10 @@
+# Normalise line endings in the repository so a clone on another platform does not
+# arrive as one enormous whitespace diff.  Text files are stored LF and checked out
+# with the platform's native convention.
+* text=auto eol=lf
+
+# Binary, never touch.
+*.stl binary
+*.png binary
+*.dwg binary
+*.pdf binary

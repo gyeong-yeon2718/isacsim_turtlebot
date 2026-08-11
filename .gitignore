@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+
+# Run artefacts.  The .log/.csv files in the repo root are evidence from a specific
+# run, not source -- regenerate them rather than committing them.
+*.log
+run_*.csv
+
+# The STL copies are the user's own parts; keep them out of version control unless
+# you intend to publish the hardware design with the code.
+assets/*.stl
