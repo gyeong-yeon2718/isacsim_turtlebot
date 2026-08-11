@@ -48,11 +48,13 @@ BEACON_PEAK = 90000.0
 class CoilGlow:
     """Drives the board's lights from the *true* link state.
 
-    **Every** coil is lit from its own coupling, not just the mission's target.  That is
-    both what a bench of energised pads actually does and what makes the run readable: the
+    **Every** coil is lit from its own coupling to the receiver, and from nothing else.  That
+    is both what a bench of energised pads actually does and what makes the run readable: the
     coil the robot starts on glows before it moves, a coil it drives across on a diagonal
     route lights up as it passes and fades as it leaves, and the destination comes up as it
-    arrives.  Lighting only the target made the other three look broken.
+    arrives.  Lighting only the target made the other three look broken; lighting the target
+    from *another* coil's measurement, which is what the first fix did, was worse -- see
+    ``update_all``.
 
     Note for fidelity: on the real rig a relay closes for one selected transmitter at a
     time, so a hardware-faithful scene would light exactly one.  This is the "all pads live"
@@ -79,25 +81,43 @@ class CoilGlow:
         self,
         rx_xy: tuple[float, float],
         target: int,
-        target_link: LinkState,
+        link: LinkState,
         *,
+        current: int | None = None,
         energised: bool,
         believed_locked: bool,
         time: float = 0.0,
     ) -> None:
-        """Light every coil from the receiver's distance to it.
+        """Light every coil from the receiver's distance to *that* coil.
 
         ``rx_xy`` is the receiver coil's true position on the board, so each transmitter is
-        driven by the coupling it would really deliver.  Non-target coils get the same colour
-        ramp but never the lock step change -- that decision belongs to the mission.
+        driven by the coupling it would really deliver.
+
+        ``current`` is the coil the mission is presently aligning to -- the one ``link`` was
+        measured against.  It is *not* necessarily ``target``: a pick-and-place run aligns on
+        the source coil first.  Only ``current`` gets the lock step change and the
+        disagreement warning, because those are statements about a measurement, and the
+        measurement belongs to one coil.
+
+        Getting this wrong is what the user saw: ``link`` was handed to ``target`` regardless,
+        so while the robot sat charging on the source coil, its 100 %-coupling measurement was
+        painted onto the *destination*, which lit up green from t = 0 -- a pad delivering full
+        power to a robot half a metre away.  The destination is now marked the way a
+        destination should be: by its core dot, which does not glow.
         """
         self.set_target(target)
-        self.update(target, target_link, energised=energised,
-                    believed_locked=believed_locked, time=time)
+        if current is None:
+            current = target
         if self.wpt is None or self.board is None:
+            self.update(current, link, energised=energised,
+                        believed_locked=believed_locked, time=time, mark=False)
             return
         for n, (cx, cy) in self.board.coil_positions.items():
-            if n == target:
+            if n == current:
+                # The measured coil: same ramp, plus the lock decision and the warning.
+                # ``mark=False`` -- the marker belongs to the destination, set just above.
+                self.update(n, link, energised=energised,
+                            believed_locked=believed_locked, time=time, mark=False)
                 continue
             offset = math.hypot(rx_xy[0] - cx, rx_xy[1] - cy)
             rel = self.wpt.relative_efficiency(offset)
@@ -123,15 +143,27 @@ class CoilGlow:
 
     def update(
         self,
-        target: int,
+        coil: int,
         link: LinkState,
         *,
         energised: bool,
         believed_locked: bool,
         time: float = 0.0,
+        mark: bool = True,
     ) -> None:
-        self.set_target(target)
-        visual = self.scene.coils[target]
+        """Paint one coil from a link measurement taken against *that* coil.
+
+        ``mark`` exists because this used to move the destination marker.  ``update_all`` marks
+        the destination, then calls this for the *measured* coil, and ``set_target`` only
+        early-returns when the coil is unchanged -- so both ran every step and the frame ended
+        with the blue core dot sitting on the measured coil and the destination wearing plain
+        ferrite.  The destination lost its marker entirely for the first third of a
+        pick-and-place run.  Defaulted to ``True`` so any caller outside this module keeps its
+        old behaviour.
+        """
+        if mark:
+            self.set_target(coil)
+        visual = self.scene.coils[coil]
 
         truly_locked = energised and link.in_tolerance
         disagreement = believed_locked and not link.in_tolerance
@@ -140,6 +172,19 @@ class CoilGlow:
             colour = _WARN
             # Fast blink: a steady magenta could be mistaken for a design choice.
             intensity = PEAK_INTENSITY * (0.35 + 0.65 * (0.5 + 0.5 * math.sin(time * 22.0)))
+        elif link.relative <= 0.02:
+            # No coupling, no light.  The same gate the geometric branch applies, and it has to
+            # be here too or the measured coil is exempt from it: ``glow_intensity`` returns the
+            # 900-unit standby floor at zero coupling and ``glow_colour`` returns saturated red,
+            # so an un-approached destination sat glowing dull red from t = 0 for the whole run.
+            # That is what the user reported, and routing the measurement to the right coil did
+            # not fix it -- in a plain alignment the destination *is* the measured coil.
+            #
+            # Deliberately *after* the disagreement branch: a believed lock whose true
+            # efficiency is below threshold must stay loud even at zero coupling.  That is the
+            # one documented case where a lit coil does not imply coupling.
+            self._darken(coil)
+            return
         else:
             colour = glow_colour(link.relative, truly_locked)
             intensity = glow_intensity(

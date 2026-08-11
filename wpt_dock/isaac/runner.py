@@ -328,6 +328,10 @@ class SimulationRunner:
                 (true_coil_pose[0], true_coil_pose[1]),
                 self.run.target_coil,
                 self.link_state,
+                # link_state was measured against *this* coil, so this is the only coil the
+                # lock decision may be applied to.  During a pick-and-place it is the source
+                # coil for the first third of the run.
+                current=self.mission.current_coil,
                 energised=self.status.energised or CHARGING in str(self.status.state)
                 or "VERIFY" in str(self.status.state) or "SETTLE" in str(self.status.state),
                 believed_locked=CHARGING in str(self.status.state),
