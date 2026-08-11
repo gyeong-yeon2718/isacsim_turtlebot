@@ -18,11 +18,11 @@ robot happens to be parked.  So the accuracy of the whole pick-and-place is the 
 the WPT alignment, and that part is fully simulated, noise and all.  Adding servo dynamics
 would change the timing and not the answer.
 
-The payload is carried the same way: it is a kinematic rigid body whose transform is driven
-from the tool centre point.  It still has mass and a collider and so do the shelves and the
-robot's deck, but the grasp itself is not a friction grasp and the release is not a gravity
-settle.  ``GripperAttachment`` says exactly what that costs and lists the three dynamic
-approaches that were tried and failed, one of which crashed PhysX.
+The payload is a dynamic rigid body that goes kinematic only while it is carried, and is handed
+back to the solver at release so it settles under gravity.  What is *not* modelled is the grasp
+itself: the jaws close onto the box rather than through it, but they do not squeeze it, and
+nothing but this code is holding it.  ``GripperAttachment`` says exactly what that costs and
+records the dead ends -- including one claim it stated as fact and had to retract.
 """
 
 from __future__ import annotations
@@ -174,42 +174,70 @@ def build_arm(
 # ---------------------------------------------------------------------------
 
 
+def _level_orientation(tcp_world: Gf.Matrix4d) -> Gf.Quatf:
+    """A level (no roll, no pitch) orientation whose +Y follows the tool's jaw axis.
+
+    USD's ``Gf.Matrix4d`` is row-major, so row *i* is the world image of the local basis
+    vector *e_i*; row 1 is therefore the jaw axis.  Projecting it into the ground plane and
+    rebuilding a pure-Z rotation gives the orientation a gripped cube actually holds.
+
+    Degenerate case: if the jaw axis were vertical the projection would vanish, and the yaw is
+    then genuinely undefined.  This arm cannot reach that pose -- the jaw axis is the rotation
+    axis of both bending joints, so it is always horizontal -- but a zero-length ``atan2`` is
+    silent rather than loud, so it is handled instead of assumed away.
+    """
+    jx, jy = float(tcp_world[1][0]), float(tcp_world[1][1])
+    if math.hypot(jx, jy) < 1e-9:
+        return Gf.Quatf(1.0, 0.0, 0.0, 0.0)
+    # R_z(theta) maps +Y to (-sin theta, cos theta), so match that against the jaw axis.
+    theta = math.atan2(-jx, jy)
+    return Gf.Quatf(math.cos(0.5 * theta), 0.0, 0.0, math.sin(0.5 * theta))
+
+
 class GripperAttachment:
     """Drives the payload's pose from the tool centre point while it is held.
 
     What is physical here and what is not, stated plainly, because two earlier versions of
     this docstring claimed more than the code delivered:
 
-    **Physical.**  The payload has mass and a collider, and so do the shelves, the station
-    tops, and -- as of this revision -- the robot's custom top plate.  That last one is what
-    turned the arm trajectory into a real constraint: lifting the payload straight up before
-    slewing it over the deck is now necessary rather than cosmetic, and there is a unit test
-    that measures the clearance.  The placement error is the arm's genuine achieved position,
-    driven by the WPT alignment error at the base, which is fully simulated with noise.
+    **Physical.**  The payload has mass and a collider, and so do the conveyor surface, the drop
+    table, and the robot's custom top plate.  That last one is what turned the arm trajectory
+    into a real constraint: lifting the payload straight up before slewing it over the deck is
+    necessary rather than cosmetic, and there is a unit test that measures the clearance.  The
+    placement error is the arm's genuine achieved position, driven by the WPT alignment error at
+    the base, which is fully simulated with noise.
 
-    **Not physical.**  The jaws do not squeeze -- the arm links carry no colliders, so the
-    grasp cannot slip and the payload cannot be knocked loose.  And the payload is kinematic
-    for the whole run, so the drop is placement, not a settle.
+    The payload is a **dynamic** rigid body that rests on the conveyor under gravity, becomes
+    kinematic for the seconds it is carried, and is handed back to the solver at release so it
+    falls the last fraction of a millimetre and settles.  So the drop is a real settle, and the
+    reported placement error is a settled position rather than a number this code wrote down.
 
-    Three approaches to a genuinely dynamic grasp were tried and are recorded here rather than
-    quietly dropped, because each one looked right going in:
+    **Not physical.**  The jaws do not squeeze -- the arm links carry no colliders, so the grasp
+    cannot slip and the payload cannot be knocked loose.  They do close *onto* the box rather
+    than through it (see ``ArmSpec.grip_angle_for``), but nothing is holding it except this
+    class.  A friction grasp would need jaw colliders and material tuning, which is a study in
+    its own right and not the question this project is asking.
+
+    Two dead ends are recorded because each looked right going in, and one because it was
+    recorded here as fact and was not:
 
     1. A ``UsdPhysics.FixedJoint`` to a kinematic gripper anchor, enabled at grasp.  It
        **crashed PhysX** -- a native fault in ``_physx.pyd`` about three seconds in.  Toggling
        ``physics:jointEnabled`` on a live joint is not the attribute-only write it appears to
        be; PhysX rebuilds the joint and does not survive it here.
-    2. Dynamic body, switched to kinematic at grasp and back at release.  PhysX does not pick
-       up ``kinematicEnabled`` mid-simulation, so the body stayed dynamic the whole time and
-       the solver and this class fought over its pose.  It looked fine only because nothing
-       else touched the payload; adding the shelf collider exposed it -- a zero-gap initial
-       overlap flicked the box off the shelf at t = 0 and it finished a metre from the pad.
-    3. Zeroing ``physics:velocity`` before handing the body back.  That attribute is an
-       initial condition, not live state, so it changed nothing and the payload was ejected to
-       z = -23.5 m.
-
-    Hence the current design: kinematic from creation, pose always authored.  A friction grasp
-    would need jaw colliders and material tuning, which is a study in its own right and not the
-    question this project is asking.
+    2. Zeroing ``physics:velocity`` on the USD prim before handing the body back.  That
+       attribute is an initial condition, not live state, so it changes nothing.  The physics
+       API is the right handle -- see ``release``.
+    3. **A retracted claim.**  An earlier version of this docstring stated that PhysX does not
+       pick up ``kinematicEnabled`` mid-simulation, and used that to justify a payload that was
+       kinematic for the entire run -- deterministic placement with no settle.  It is false.
+       The flip works on the frame it is written, confirmed against this install by watching
+       ``get_physics_stats()`` move ``numKinematicBodies`` 1 -> 0 with no step in between.  The
+       claim was inferred from a run in which the payload was ejected to z = -23.5 m, and the
+       real cause of that was the collision documented in
+       ``exclude_from_collision_with`` -- the same one that launched the robot off the board.
+       One failure, two symptoms, and attributing it to the nearest suspicious API cost a
+       working feature.  Measure the thing.
     """
 
     def __init__(self, stage, payload_path: str) -> None:
@@ -221,6 +249,9 @@ class GripperAttachment:
             raise RuntimeError(f"payload prim missing: {payload_path}")
         self._prim = prim
         self._rb = UsdPhysics.RigidBodyAPI(prim)
+        self._kinematic = self._rb.CreateKinematicEnabledAttr(False)
+        self._view = None
+        self._np = None
         # The payload prim is a bare wrapper Xform whose child carries the geometry, so it
         # arrives with no transform ops and these two are the only ones it will ever have.
         # Deliberately *not* clearing an existing op order: doing that on a prim built by
@@ -256,36 +287,120 @@ class GripperAttachment:
         self._translate.Set(Gf.Vec3d(*position))
 
     def world_position(self) -> Gf.Vec3d:
-        cache = UsdGeom.XformCache(Usd.TimeCode.Default())
-        return cache.GetLocalToWorldTransform(self._prim).ExtractTranslation()
+        """Where the payload actually is, asked of **physics** and not of USD.
+
+        This distinction is the whole difference between measuring a result and reporting an
+        intention.  Once the body is dynamic the solver owns its pose and USD holds whatever was
+        last authored -- which after a release is the pose the jaws let go at.  Reading that back
+        would report a perfect placement no matter what the box then did, including falling
+        through the floor.  The USD read is kept only as the pre-simulation fallback.
+        """
+        try:
+            pos, _ = self._rigid_view().get_world_poses()
+            return Gf.Vec3d(float(pos[0][0]), float(pos[0][1]), float(pos[0][2]))
+        except Exception:                         # noqa: BLE001 - before play, or no view
+            cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+            return cache.GetLocalToWorldTransform(self._prim).ExtractTranslation()
+
+    def rest_report(self) -> str:
+        """Speed and tilt at the moment of asking -- the evidence that it settled.
+
+        A frozen kinematic body and a settled dynamic one look identical in a position readout.
+        They do not look identical here: a settled box reads a speed of a few tenths of a
+        millimetre per second and a pitch of zero.
+        """
+        try:
+            view = self._rigid_view()
+            vel = view.get_velocities()[0]
+            lin = float(self._np.linalg.norm(vel[:3]))
+            ang = float(self._np.linalg.norm(vel[3:]))
+            _, quat = view.get_world_poses()
+            w, x, y, z = (float(v) for v in quat[0])
+            # Tilt of the body's own +Z away from world +Z.
+            up_z = 1.0 - 2.0 * (x * x + y * y)
+            tilt = math.degrees(math.acos(max(-1.0, min(1.0, up_z))))
+            return (f"at rest: speed {lin * 1000:.2f} mm/s, spin {math.degrees(ang):.2f} deg/s, "
+                    f"tilt {tilt:.2f} deg off level")
+        except Exception as exc:                  # noqa: BLE001
+            return f"rest state unavailable ({exc})"
+
+    def _rigid_view(self):
+        """The physics-API handle, built lazily because it needs a live simulation view.
+
+        ``reset_xform_properties=False`` matters: the default rewrites the prim's transform ops,
+        and this class owns them.  Letting it rewrite them risks the failure recorded above --
+        a dropped scale op turning a 25 mm box into a 1 m cube.
+        """
+        if self._view is None:
+            import numpy as np
+            from isaacsim.core.prims import RigidPrim
+
+            self._np = np
+            self._view = RigidPrim(prim_paths_expr=self.payload_path, name="payload_view",
+                                   reset_xform_properties=False)
+            self._view.initialize()
+        return self._view
 
     def grasp(self) -> None:
-        """Start driving the payload from the tool centre point.
+        """Take the payload out of the solver's hands and drive it from the tool centre point.
 
-        No physics state changes here.  The payload is authored kinematic at build time (see
-        ``warehouse.build_warehouse``) precisely so that grasping and releasing are pure
-        bookkeeping -- switching ``kinematicEnabled`` at runtime does not reach PhysX, and the
-        earlier version that tried it produced a payload that PhysX was still simulating while
-        this class wrote transforms on top of it.
+        PhysX picks this attribute up on the frame it is written -- measured, not assumed:
+        ``get_physics_stats()`` moves ``numKinematicBodies`` 0 -> 1 immediately, with no step in
+        between.
         """
         self.held = True
+        self._kinematic.Set(True)
 
     def release(self) -> None:
-        """Stop driving the payload.  It stays on the pad, kinematic, where the jaws left it.
+        """Hand the payload back to the solver so it falls the last fraction and settles.
 
-        A kinematic body holds its authored pose, so this is deterministic placement rather
-        than a gravity settle: nothing tips, rolls, or falls the last fraction of a
-        millimetre.  The reported placement error is the arm's achieved position, which is the
-        quantity being measured, but it is not a settled-under-gravity result and should not be
-        read as one.
+        Order is not interchangeable and was measured: flip the attribute first, *then* zero the
+        velocity.  ``set_velocities`` on a body that is still kinematic returns success and
+        changes nothing -- PhysX derives a kinematic actor's reported velocity from its pose
+        targets, so it is not settable.
+
+        The zeroing is insurance rather than the fix: the kinematic-to-dynamic transition
+        discards velocity by itself (a probe released a 60 m/s kinematic actor and it fell
+        straight down).  It is kept because it costs nothing and because ``get_velocities()``
+        reading exactly zero afterwards is a cheap assertion that the hand-off happened.
+
+        Deliberately *not* done here, all measured as unnecessary or harmful:
+        ``flush_changes()``, ``enable_rigid_body_physics()``, ``wake_up()``, and a fixed joint.
+        Cycling ``rigidBodyEnabled`` or removing and re-applying ``RigidBodyAPI`` to force the
+        change permanently breaks the tensor view ("Failed to get rigid body velocities from
+        backend") and is not needed.
         """
         self.held = False
+        self._kinematic.Set(False)
+        try:
+            view = self._rigid_view()
+            view.set_velocities(self._np.zeros((1, 6), dtype=self._np.float32))
+        except Exception as exc:                  # noqa: BLE001 - report and carry on
+            # The transition discards velocity without this, so a failure here costs realism in
+            # an edge case, not the run.  Silence would be worse than a line of output.
+            print(f"  [arm] note: could not zero the payload velocity ({exc})", flush=True)
 
     def follow(self, rig: ArmRig) -> None:
-        """Drive the payload to the tool centre point.  Only while held."""
+        """Drive the payload to the tool centre point.  Only while held.
+
+        The payload takes the tool's **position and yaw only** -- it stays level.  That is not
+        a simplification, it is what the mechanism does.  The shoulder and elbow rotate about
+        the body +Y, and the jaws separate along that same +Y, so the jaw axis stays horizontal
+        at every arm pose.  Two flat pads closing on a cube's opposite *vertical* faces cannot
+        impose a pitch on it: the box was sitting level on the shelf, and it is still level in
+        the jaws.
+
+        Copying the tool's full rotation instead -- which is what this did -- rolled the cube
+        by the forearm's elevation.  At the place pose that is about 81 degrees, so the box was
+        carried and then left standing on a corner, and being kinematic it stayed there.  The
+        user's report was that the object is placed tilted and stays tilted.
+
+        The yaw is taken from the jaw axis rather than from ``rig.pose.base``, so it stays
+        correct without this function having to know how the arm is mounted or which way the
+        chassis is pointing.
+        """
         if not self.held:
             return
         mat = rig.tcp_world(self.stage)
         self._translate.Set(mat.ExtractTranslation())
-        rot = mat.ExtractRotationQuat()
-        self._orient.Set(Gf.Quatf(float(rot.GetReal()), *[float(v) for v in rot.GetImaginary()]))
+        self._orient.Set(_level_orientation(mat))

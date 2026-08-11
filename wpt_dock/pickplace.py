@@ -104,6 +104,7 @@ class PickPlaceMission:
         grasp_world: tuple[float, float, float],
         drop_world: tuple[float, float, float],
         plate_top_z: float,
+        payload_width: float | None = None,
     ) -> None:
         self.s = settings
         self.arm_spec = arm
@@ -112,6 +113,12 @@ class PickPlaceMission:
         self.grasp_world = grasp_world
         self.drop_world = drop_world
         self.plate_top_z = plate_top_z
+        # The width the jaws must close onto.  ``None`` means "close to the mechanical stop",
+        # which is only right when there is nothing in the jaws.
+        self.payload_width = payload_width
+        self.grip_angle = (
+            arm.gripper_closed if payload_width is None else arm.grip_angle_for(payload_width)
+        )
 
         route = plan_route(settings.board, self.source_coil, self.target_coil)
         self.source_heading = route.legs[0].heading if route.legs else 0.0
@@ -135,6 +142,16 @@ class PickPlaceMission:
 
     def coil_errors(self, pose: Pose) -> tuple[float, float, float]:
         return self.mission.coil_errors(pose)
+
+    @property
+    def current_coil(self) -> int:
+        """The coil the *active* alignment is working on, which is not the final target.
+
+        During ``ALIGN_SOURCE`` and ``PICK`` this is the source coil.  Reporting the final
+        target here instead is what made the destination coil glow -- and go charging-green --
+        at t = 0, while the robot was actually sitting on the source.
+        """
+        return self.mission.current_coil
 
     @property
     def arm_state(self) -> ArmState:
@@ -172,7 +189,9 @@ class PickPlaceMission:
         if self.phase == ALIGN_SOURCE:
             self.align_errors["source"] = errors
             self.phase = PICK
-            self.sequencer.start(pick_sequence(self.grasp_world, self.arm_spec))
+            self.sequencer.start(
+                pick_sequence(self.grasp_world, self.arm_spec, grip_width=self.payload_width)
+            )
             self.message = (
                 f"aligned on coil {self.source_coil} "
                 f"(believed x {errors[0] * 1000:+.1f} mm, y {errors[1] * 1000:+.1f} mm, "

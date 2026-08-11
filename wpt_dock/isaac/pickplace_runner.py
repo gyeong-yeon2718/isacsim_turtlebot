@@ -16,7 +16,7 @@ from ..config import Settings
 from ..pickplace import DONE, FAILED, PICK, PLACE, PickPlaceMission
 from .arm_build import ArmRig, GripperAttachment, build_arm
 from .runner import RunConfig, SimulationRunner
-from .warehouse import WarehouseScene, build_warehouse
+from .warehouse import PAYLOAD_SIZE, WarehouseScene, build_warehouse
 
 
 class PickPlaceRunner(SimulationRunner):
@@ -50,7 +50,13 @@ class PickPlaceRunner(SimulationRunner):
         # payload is positioned.
         self.carry = GripperAttachment(stage, self.warehouse.payload_path)
         self.carry.exclude_from_collision_with(handles.prim_path)
-        self.carry.place_at(self.warehouse.pick.grasp_point)
+        # Spawned 1 mm clear of the rollers rather than exactly in contact.  The payload is a
+        # dynamic body now, so it drops that millimetre in about 14 ms and is at rest long
+        # before the arm arrives at t = 4.4 s -- and starting a body in exact surface contact
+        # asks the solver to resolve a zero-gap overlap on frame one, which is a question worth
+        # not asking.
+        gx, gy, gz = self.warehouse.pick.grasp_point
+        self.carry.place_at((gx, gy, gz + 0.001))
         self._notes = list(handles.notes) + list(self.warehouse.notes)
         self._notes.extend(workspace_report(self.arm_spec).splitlines())
         return handles
@@ -65,6 +71,7 @@ class PickPlaceRunner(SimulationRunner):
             grasp_world=self.warehouse.pick.grasp_point,
             drop_world=self.warehouse.place.grasp_point,
             plate_top_z=self.handles.plate_top_z,
+            payload_width=PAYLOAD_SIZE,
         )
         if self.run.verbose:
             print(f"  [arm] payload starts on the {self.warehouse.pick.name} at "
@@ -108,7 +115,10 @@ class PickPlaceRunner(SimulationRunner):
         spec = self.arm_spec
         eps = math.radians(1.0)
         phase = self.mission.phase
-        closed = state.gripper <= spec.gripper_closed + eps
+        # "Closed" means closed *onto the payload*, not to the mechanical stop -- the jaws stop
+        # at the box's width.  Keying off gripper_closed here would never fire once the
+        # sequence started commanding the contact angle instead.
+        closed = state.gripper <= self.mission.grip_angle + eps
         opened = state.gripper >= spec.gripper_open - eps
 
         if phase == PICK and closed and not self.carry.held:
@@ -151,6 +161,7 @@ class PickPlaceRunner(SimulationRunner):
                 f"lateral, {dz * 1000:+.2f} mm vertical, "
                 f"radial {math.hypot(dx, dy) * 1000:.2f} mm"
             )
+            lines.append("  PAYLOAD " + self.carry.rest_report())
             lines.append(
                 "  the arm has no sensor on the shelf, so this error is the docking error "
                 "plus the arm's own geometry -- which is the whole reason the alignment matters"

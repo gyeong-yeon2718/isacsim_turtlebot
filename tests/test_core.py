@@ -756,10 +756,10 @@ class TestArm(unittest.TestCase):
         plate height the build measures.  Going straight from the lift pose to CARRY leaves
         about -5 mm of clearance, which is why HOME is now in between.
         """
-        from wpt_dock.arm import CARRY, HOME, ArmPose, path_clearance, solve_ik
+        from wpt_dock.arm import CARRY, HOME, PAYLOAD_HALF, ArmPose, path_clearance, solve_ik
 
         plate_top = 0.1653          # m, as measured by the Isaac build
-        payload_half = 0.0175       # m, half of the 35 mm cube
+        payload_half = PAYLOAD_HALF   # the scene's own constant, not a literal that can drift
 
         # The lift pose above the pick shelf, as the sequence actually solves it.
         lift = solve_ik(self.spec, (0.014, 0.135, -0.043))
@@ -807,13 +807,80 @@ class TestArm(unittest.TestCase):
                                        msg=f"{target} {axis}: FK/IK disagree")
 
     def test_carry_pose_holds_the_payload_above_the_deck(self):
-        from wpt_dock.arm import CARRY, HOME, payload_height
+        from wpt_dock.arm import CARRY, HOME, PAYLOAD_HALF, payload_height
 
         plate_top = 0.1653
         for name, pose in (("HOME", HOME), ("CARRY", CARRY)):
             z = payload_height(self.spec, pose, plate_top)
-            self.assertGreater(z - 0.0175, plate_top + 0.010,
+            self.assertGreater(z - PAYLOAD_HALF, plate_top + 0.010,
                                f"{name} holds the payload too low: {z * 1000:.1f} mm")
+
+    def test_the_payload_fits_between_the_jaws(self):
+        """The carried object must be strictly inside the jaws' travel.
+
+        The shipped value was a 35 mm cube against 34 mm of maximum jaw opening, and the pick
+        sequence commanded the jaws to their 6 mm mechanical stop -- so they closed 14.5 mm
+        into each side of the box.  The user's report was that the object was far too big for
+        the gripper, and it was.  Two separate mistakes, so two separate assertions.
+        """
+        from wpt_dock.arm import PAYLOAD_SIZE
+
+        # The *usable gap* is what an object passes through: pad centres minus pad thickness.
+        open_gap = self.spec.gripper_clear(self.spec.gripper_open)
+        closed_gap = self.spec.gripper_clear(self.spec.gripper_closed)
+        self.assertLess(PAYLOAD_SIZE, open_gap,
+                        "the jaws cannot open wide enough to go around the payload")
+        self.assertGreater(PAYLOAD_SIZE, closed_gap,
+                           "the payload is thinner than the closed jaws, so it cannot be gripped")
+        self.assertGreater(0.5 * (open_gap - PAYLOAD_SIZE), 0.002,
+                           "less than 2 mm of clearance per jaw is not a believable approach")
+
+        # The pad *faces* must stop on the box, not at the mechanical limit and not sunk into
+        # it -- the pads have thickness and the transforms place their centres.
+        angle = self.spec.grip_angle_for(PAYLOAD_SIZE)
+        self.assertAlmostEqual(self.spec.gripper_clear(angle), PAYLOAD_SIZE, places=9)
+        self.assertAlmostEqual(self.spec.gripper_span(angle),
+                               PAYLOAD_SIZE + self.spec.jaw_pad_thickness, places=9)
+        self.assertGreater(angle, self.spec.gripper_closed,
+                           "closing to the mechanical stop means the jaws pass through the box")
+        self.assertLess(angle, self.spec.gripper_open, "the jaws have to actually move")
+
+        # And an ungrippable object must be refused rather than mimed.
+        with self.assertRaises(ValueError):
+            self.spec.grip_angle_for(open_gap + 0.001)
+        with self.assertRaises(ValueError):
+            self.spec.grip_angle_for(closed_gap - 0.001)
+
+    def test_the_measured_coil_is_the_source_before_transit(self):
+        """``current_coil`` must name the coil ``coil_errors`` is measured against.
+
+        The lights are driven from the link monitor, which is fed ``coil_errors``.  If the
+        supervisor reports the *final* target while the active alignment is on the *source*,
+        the source coil's full-coupling measurement gets attributed to the destination -- and
+        the destination lights up, and steps to charging-green, from t = 0 with the robot half
+        a metre away.  That is what the user saw.  This pins the invariant that prevented it.
+        """
+        from wpt_dock.arm import ArmSpec
+        from wpt_dock.config import DEFAULTS
+        from wpt_dock.fsm import MissionController
+        from wpt_dock.pickplace import ALIGN_SOURCE, TRANSIT, PickPlaceMission
+
+        board = DEFAULTS.board
+        grasp = (board.coil_positions[1][0] - 0.10, board.coil_positions[1][1], 0.1175)
+        drop = (board.coil_positions[4][0] + 0.10, board.coil_positions[4][1], 0.1175)
+        m = PickPlaceMission(DEFAULTS, ArmSpec(), 1, 4,
+                             grasp_world=grasp, drop_world=drop, plate_top_z=0.1653)
+
+        self.assertEqual(m.phase, ALIGN_SOURCE)
+        self.assertEqual(m.current_coil, 1,
+                         "while aligning on the source, the measured coil is the source")
+        self.assertNotEqual(m.current_coil, m.target_coil,
+                            "if these were equal the test could not detect the defect")
+
+        # Force the supervisor into the transit alignment and re-check.
+        m.phase = TRANSIT
+        m.mission = MissionController(DEFAULTS, 1, 4, initial_heading=0.0)
+        self.assertEqual(m.current_coil, 4, "once driving to the target, that is the measured coil")
 
     def test_unreachable_waypoint_fails_the_sequence(self):
         from wpt_dock.arm import ArmSequencer, Waypoint

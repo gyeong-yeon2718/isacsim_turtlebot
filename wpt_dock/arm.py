@@ -106,14 +106,70 @@ class ArmSpec:
     def max_reach(self) -> float:
         return self.l_upper + self.distal
 
+    # Jaw pad *centre* separation at the servo's travel limits, and the pad thickness.
+    #
+    # ESTIMATED, and the estimate is this project's own: both upstream repositories document
+    # the gripper purely as an angle-commanded peripheral (``GO`` / ``GC`` / ``G(30)``) and
+    # state no jaw travel, no opening width in millimetres, and no maximum graspable object
+    # size anywhere in their READMEs, findings, or firmware notes.  The only remaining physical
+    # source of truth upstream is ``gripper.stl``.  So these are labelled guesses, and when the
+    # payload did not fit, the payload is what moved -- widening the jaws would have meant
+    # inventing a second unsourced number on top of the first.
+    span_closed: float = 0.006       # m, pad centre separation at gripper_closed
+    span_open: float = 0.034         # m, pad centre separation at gripper_open
+    jaw_pad_thickness: float = 0.004  # m, matches the pad boxes in isaac/arm_build.py
+
     def gripper_span(self, opening: float) -> float:
-        """Jaw separation for a gripper servo angle, for drawing the jaws.
+        """Jaw pad **centre** separation for a gripper servo angle.
 
         Linear in the servo angle, which is what a simple two-finger linkage gives to
-        first order.  ESTIMATED 34 mm at full open.
+        first order.  This is the quantity the USD build writes to the jaw transforms.
         """
         frac = 0.0 if self.gripper_open <= 0 else clamp(opening / self.gripper_open, 0.0, 1.0)
-        return 0.006 + 0.028 * frac
+        return self.span_closed + (self.span_open - self.span_closed) * frac
+
+    def gripper_clear(self, opening: float) -> float:
+        """The usable gap between the pads' inner faces.
+
+        The pads have thickness, and it is the *faces* that touch an object, not the centres
+        the transforms are placed at.  Ignoring the 4 mm leaves the pads overlapping the object
+        by 2 mm each -- which reads as jaws sunk into the box, the very thing being fixed.
+        """
+        return self.gripper_span(opening) - self.jaw_pad_thickness
+
+    def grip_angle_for(self, width: float) -> float:
+        """The servo angle at which the pad faces come to rest on an object ``width`` wide.
+
+        A gripper does not close to its mechanical limit around an object; it closes *until it
+        touches*, and the object's width sets where that is.  Commanding ``gripper_closed``
+        instead is why the jaws visibly passed through the payload: the servo went to 6 mm of
+        separation while the box was 35 mm across, so 14.5 mm of box stuck out through each
+        jaw.  The user's report was "the object is too big for the gripper", and it was both
+        that and this.
+
+        Raises rather than clamps if the object cannot be gripped at all.  Clamping would give
+        a pose that looks like a grasp and is not one, which is the failure mode this whole
+        module is trying to avoid.
+        """
+        lo = self.gripper_clear(self.gripper_closed)
+        hi = self.gripper_clear(self.gripper_open)
+        if not (lo <= width <= hi):
+            raise ValueError(
+                f"a {width * 1000:.1f} mm object is outside the jaws' usable "
+                f"{lo * 1000:.0f}-{hi * 1000:.0f} mm gap"
+            )
+        span = width + self.jaw_pad_thickness
+        frac = (span - self.span_closed) / (self.span_open - self.span_closed)
+        return self.gripper_open * frac
+
+
+# The payload the gripper carries.  It lives here, beside the jaw travel that determines it,
+# rather than in the USD scene module: it is a *specification* constrained by the hardware, and
+# putting it behind a ``pxr`` import meant the tests could not reference it and hardcoded 17.5 mm
+# instead -- which then silently disagreed with the scene.
+PAYLOAD_SIZE = 0.025             # m, cube edge.  Must lie strictly inside the jaws' travel.
+PAYLOAD_MASS = 0.040             # kg, a light printed/cardboard box an SG90 could lift
+PAYLOAD_HALF = 0.5 * PAYLOAD_SIZE
 
 
 @dataclass(frozen=True)
@@ -446,7 +502,7 @@ def path_clearance(
 
 
 def pick_sequence(grasp_point: tuple[float, float, float], spec: ArmSpec,
-                  approach: float = 0.060) -> list[Waypoint]:
+                  approach: float = 0.060, grip_width: float | None = None) -> list[Waypoint]:
     """Vertical approach, close, lift, raise clear of the deck, then fold for transit.
 
     The approach is straight down onto the object.  With three joints the gripper's tilt is
@@ -460,11 +516,14 @@ def pick_sequence(grasp_point: tuple[float, float, float], spec: ArmSpec,
     ``path_clearance`` is the function that checks it rather than trusting the eye.
     """
     above = (grasp_point[0], grasp_point[1], grasp_point[2] + approach)
+    # Close onto the object, not to the mechanical stop.  ``grip_angle_for`` refuses an object
+    # the jaws cannot span, so an unsuitable payload fails here rather than being mimed.
+    close_to = spec.gripper_closed if grip_width is None else spec.grip_angle_for(grip_width)
     return [
         Waypoint("open the gripper", gripper=spec.gripper_open),
         Waypoint("reach above the object", world_target=above, settle=0.2),
         Waypoint("descend onto the object", world_target=grasp_point, settle=0.35),
-        Waypoint("close the gripper", gripper=spec.gripper_closed, settle=0.4),
+        Waypoint("close onto the object", gripper=close_to, settle=0.4),
         Waypoint("lift", world_target=above, settle=0.2),
         Waypoint("raise in place", joint_target=HOME, hold_base=True, settle=0.15),
         Waypoint("slew to centre", joint_target=HOME, settle=0.15),

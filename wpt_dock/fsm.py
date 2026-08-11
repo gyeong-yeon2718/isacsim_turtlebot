@@ -185,6 +185,19 @@ class MissionController:
         proj = self.final_ray.project(pose[0], pose[1])
         return proj.s, proj.lateral, wrap_angle(pose[2] - proj.heading)
 
+    @property
+    def current_coil(self) -> int:
+        """The coil ``coil_errors`` is measured against, right now.
+
+        For a single alignment that is just the target, but the caller cannot assume so: a
+        supervisor that runs several alignments in sequence has a *current* coil that is not
+        the *final* one.  Anything that consumes ``coil_errors`` -- the link monitor, the
+        lights -- has to key off this, or it attributes one coil's measurement to another.
+        That is exactly the bug that put a charging-green glow on the destination coil while
+        the robot was still parked on the source.
+        """
+        return self.target_coil
+
     def _approach_speed(self, remaining: float) -> float:
         sp = self.s.speeds
         if remaining > self.s.dock.approach_radius:
