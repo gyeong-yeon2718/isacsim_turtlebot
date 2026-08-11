@@ -461,9 +461,18 @@ class MissionController:
     def _step_retreat(self, pose: Pose, dt: float) -> MissionStatus:
         proj = self.final_ray.project(pose[0], pose[1])
         if proj.s <= self.retreat_target + 0.005:
-            self.state = CORNER if self.final_leg is not None else SETTLE
             if self.final_leg is not None:
+                self.state = CORNER
                 self.leg_index = self.n_legs - 1
+            else:
+                # No leg to re-enter on -- this is the "re-align on the coil I am parked on"
+                # case.  Going back to SETTLE here was a bug: the robot had just *reversed
+                # away* from the coil, so SETTLE would judge a worse error than the one that
+                # triggered the retreat, retreat again, and exhaust the budget without ever
+                # driving in.  The ray exists and the reverse follower has kept the nose
+                # pointed down it, so the correct destination is APPROACH.
+                self.state = APPROACH
+                self._feasibility_clock = 0.0
             self.message = f"backed off to {-proj.s * 100:.1f} cm, re-entering"
             return self._status(self.state, 0.0, 0.0, message=self.message)
 

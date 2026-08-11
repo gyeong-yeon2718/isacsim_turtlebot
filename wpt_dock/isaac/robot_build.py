@@ -80,6 +80,7 @@ class RobotHandles:
     chassis_path: str
     camera_prims: dict[str, str]
     plate_lens_z: float          # m, measured lens height above the running surface
+    plate_top_z: float           # m, upper surface of the printed plate; the arm mounts here
     visuals_from_asset: bool
     notes: list[str]
 
@@ -378,9 +379,10 @@ def _attach_custom_parts(
 
     notes.append(
         f"deck top measured at z = {deck_top_z * 1000:.1f} mm; printed plate underside "
-        f"{plate_bottom_z * 1000:.1f} mm; camera lenses {lens_z * 1000:.1f} mm"
+        f"{plate_bottom_z * 1000:.1f} mm; camera lenses {lens_z * 1000:.1f} mm; "
+        f"plate top {(plate_bottom_z + plate_thickness) * 1000:.1f} mm"
     )
-    return camera_prims, lens_z
+    return camera_prims, lens_z, plate_bottom_z + plate_thickness
 
 
 # ---------------------------------------------------------------------------
@@ -531,12 +533,13 @@ def build_robot(
     for path, _z0, z1 in tops[:4]:
         notes.append(f"    {z1 * 1000:7.1f}  {path}")
 
-    camera_prims, lens_z = _attach_custom_parts(
+    camera_prims, lens_z, plate_top_z = _attach_custom_parts(
         stage, settings, base_path, deck_top_z=deck_top_z, chassis_origin_z=r.wheel_radius,
         top_plate_stl=top_plate_stl, tower_stl=tower_stl, notes=notes,
     )
 
     return RobotHandles(
         prim_path=prim_path, wheel_joints=(LEFT_JOINT, RIGHT_JOINT), chassis_path=base_path,
-        camera_prims=camera_prims, plate_lens_z=lens_z, visuals_from_asset=grafted, notes=notes,
+        camera_prims=camera_prims, plate_lens_z=lens_z, plate_top_z=plate_top_z,
+        visuals_from_asset=grafted, notes=notes,
     )

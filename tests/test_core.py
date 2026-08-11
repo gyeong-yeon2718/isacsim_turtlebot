@@ -620,6 +620,136 @@ class TestCameras(unittest.TestCase):
                 self.assertLess(abs(wrap_angle(est[2] - pose[2])), s.dock.yaw_tol)
 
 
+class TestArm(unittest.TestCase):
+    """The cute_arm kinematics, checked against the one pose upstream documents."""
+
+    def setUp(self):
+        from wpt_dock.arm import ArmSpec
+
+        self.spec = ArmSpec()
+
+    def test_home_pose_matches_the_documented_rest_position(self):
+        """Upstream documents the rest pose as (12, 0, 12) cm from the shoulder pivot.
+
+        That single published number is the only external check available on this
+        convention, so it is worth asserting rather than eyeballing: if the joint sign
+        convention were flipped, everything downstream would still look plausible and be
+        mirrored.
+        """
+        from wpt_dock.arm import HOME, forward_kinematics
+
+        tip = forward_kinematics(self.spec, HOME)
+        self.assertAlmostEqual(tip[0], 0.120, places=9)
+        self.assertAlmostEqual(tip[1], 0.000, places=9)
+        self.assertAlmostEqual(tip[2], 0.120, places=9)
+
+    def test_ik_inverts_fk_over_the_workspace(self):
+        from wpt_dock.arm import forward_kinematics, solve_ik
+
+        rng = np.random.default_rng(5)
+        tested = 0
+        for _ in range(4000):
+            target = (
+                float(rng.uniform(0.04, 0.22)),
+                float(rng.uniform(-0.12, 0.12)),
+                float(rng.uniform(-0.12, 0.20)),
+            )
+            res = solve_ik(self.spec, target)
+            if not res.ok:
+                continue
+            back = forward_kinematics(self.spec, res.pose)
+            for a, b in zip(back, target):
+                self.assertAlmostEqual(a, b, places=9)
+            tested += 1
+        self.assertGreater(tested, 500, "workspace sampling found too few reachable targets")
+
+    def test_reach_limits_are_enforced_not_clamped(self):
+        """Out-of-reach targets must be refused, not silently approximated.
+
+        A solver that clamps returns a pose that looks fine and puts the gripper somewhere
+        else, which in a pick-and-place run means dropping the payload next to the target
+        rather than on it.
+        """
+        from wpt_dock.arm import solve_ik
+
+        far = solve_ik(self.spec, (0.30, 0.0, 0.0))
+        self.assertFalse(far.ok)
+        self.assertIn("beyond", far.reason)
+        near = solve_ik(self.spec, (0.01, 0.0, 0.0))
+        self.assertFalse(near.ok)
+        self.assertIn("dead zone", near.reason)
+        # Just inside the documented envelope must succeed.
+        self.assertTrue(solve_ik(self.spec, (0.225, 0.0, 0.0)).ok)
+
+    def test_base_error_passes_straight_through_to_the_target(self):
+        """10 mm of base error must be 10 mm of target error -- no more, no less.
+
+        This is the link between the two halves of the project: the arm cannot see the
+        shelf, so its placement accuracy *is* the alignment accuracy, and nothing in the
+        transform is allowed to amplify or hide that.
+        """
+        from wpt_dock.arm import base_frame_target
+
+        world = (0.30, 0.0, 0.10)
+        exact = base_frame_target(self.spec, (0.0, 0.0, 0.0), 0.165, world)
+        shifted = base_frame_target(self.spec, (0.010, 0.0, 0.0), 0.165, world)
+        self.assertAlmostEqual(exact[0] - shifted[0], 0.010, places=12)
+        lifted = base_frame_target(self.spec, (0.0, 0.0, 0.0), 0.175, world)
+        self.assertAlmostEqual(exact[2] - lifted[2], 0.010, places=12)
+
+    def test_rotating_the_base_rotates_the_target(self):
+        """With the arm on the robot's centreline a 90 deg turn swaps the axes exactly.
+
+        Checked with a zero mount offset on purpose.  With the real -15 mm offset the pivot
+        itself moves when the robot turns, so the plain axis-swap identity does *not* hold --
+        which is worth pinning down, because assuming it does is an easy way to introduce a
+        15 mm error that only appears at non-zero headings.
+        """
+        from wpt_dock.arm import ArmSpec, base_frame_target
+
+        centred = ArmSpec(mount_offset=(0.0, 0.0))
+        world = (0.30, 0.0, 0.10)
+        exact = base_frame_target(centred, (0.0, 0.0, 0.0), 0.165, world)
+        turned = base_frame_target(centred, (0.0, 0.0, math.pi / 2), 0.165, world)
+        self.assertAlmostEqual(turned[0], exact[1], places=9)
+        self.assertAlmostEqual(turned[1], -exact[0], places=9)
+
+        # And with the real offset the pivot translation must show up.
+        offset = base_frame_target(self.spec, (0.0, 0.0, math.pi / 2), 0.165, world)
+        self.assertAlmostEqual(offset[0], -self.spec.mount_offset[0], places=9)
+
+    def test_sequencer_respects_the_servo_rate(self):
+        from wpt_dock.arm import ArmSequencer, ArmPose, Waypoint
+
+        seq = ArmSequencer(self.spec)
+        target = ArmPose(math.radians(60.0), math.radians(90.0), math.radians(-90.0))
+        seq.start([Waypoint("swing", joint_target=target, settle=0.0)])
+        dt = 1.0 / 60.0
+        steps = 0
+        while not seq.finished and steps < 20000:
+            before = seq.state.pose.base
+            seq.step(dt)
+            self.assertLessEqual(
+                abs(seq.state.pose.base - before), self.spec.servo_rate * dt + 1e-12
+            )
+            steps += 1
+        self.assertTrue(seq.succeeded)
+        self.assertAlmostEqual(seq.state.pose.base, target.base, places=3)
+        # 60 deg at 60 deg/s is about a second; assert the order of magnitude so an
+        # accidental instantaneous jump would fail.
+        self.assertGreater(steps * dt, 0.8)
+
+    def test_unreachable_waypoint_fails_the_sequence(self):
+        from wpt_dock.arm import ArmSequencer, Waypoint
+
+        seq = ArmSequencer(self.spec)
+        seq.set_ik_context((0.0, 0.0, 0.0), 0.165)
+        seq.start([Waypoint("impossible", world_target=(2.0, 0.0, 0.0))])
+        self.assertTrue(seq.finished)
+        self.assertFalse(seq.succeeded)
+        self.assertIn("unreachable", seq.state.message)
+
+
 class TestBoardGeometry(unittest.TestCase):
     def test_coil_array_is_centred_on_the_stage(self):
         b = BoardSpec()

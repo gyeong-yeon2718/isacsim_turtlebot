@@ -243,6 +243,14 @@ class SimulationRunner:
         w = self.robot.get_wheel_velocities()
         return self.s.robot.wheels_to_body(float(w[0]), float(w[1]))
 
+    def _after_control(self, dt: float) -> None:
+        """Extension point, called once per control step after the wheels are commanded.
+
+        No-op here.  The pick-and-place runner uses it to push the arm's joint angles into
+        the rig and to carry the payload, which has to happen at the control rate and after
+        the mission has decided what the arm should be doing.
+        """
+
     def wheel_slip(self, commanded_v: float) -> float:
         """Fraction of commanded forward speed that the chassis is *not* achieving.
 
@@ -303,6 +311,7 @@ class SimulationRunner:
             believed = compose(self.estimator.pose, (offset[0], offset[1], 0.0))
             self.status = self.mission.step(believed, dt)
             self.command(self.status.v, self.status.w)
+            self._after_control(dt)
 
             if self.status.finished:
                 self.finished = True
