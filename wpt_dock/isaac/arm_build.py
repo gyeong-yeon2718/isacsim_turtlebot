@@ -263,16 +263,37 @@ class ArmRig:
 #: is driven every frame and the grasp angle is a measured quantity, not decoration.  One mesh
 #: cannot be two moving parts, so the procedural pads stay and the file is skipped with a note.
 #: Splitting it into left and right in a mesh editor is what would change that.
+#: Measured extents of the six used files, in mm, so the placements below are derived rather than
+#: guessed.  Read straight off the meshes:
+#:
+#:   base_slim              150.00 x 150.00 x  22.00     min (-75.00, -75.00, -20.00)
+#:   base_rotation           65.00 x  38.00 x  46.20     min (-35.00, -18.00, +13.80)
+#:   lower_arm              155.17 x  29.61 x   4.00     min (+32.39, +84.20, +101.41)
+#:   upper_arm              130.08 x  11.22 x  25.11     min (+89.92, +108.88, +165.52)
+#:   gripper_upper_arm      149.00 x  19.01 x  23.00     min (+83.00, +103.59, +165.50)
+#:   gripper                 92.16 x  29.00 x  20.44     min (+139.68, +97.56, +179.50)
+#:
+#: Two things follow that are not obvious.  First, the four distal parts have large positive
+#: origins in one shared frame -- they were exported **in place from an assembly**, so their own
+#: coordinates are meaningless in isolation and every one has to be recentred onto its joint.
+#: Second, ``lower_arm`` is 4 mm thick **in Z** while every other link is thick in Y: it is
+#: exported in its *print* pose, lying flat on the bed, which is exactly what the upstream print
+#: table implies by giving it no supports.  It gets rotated upright; the others do not.
+#:
+#: The links are recentred in all three axes and then pushed out to their segment midpoint.  That
+#: is exact to the extent the end bosses are symmetric, and they are: 155.17 mm of part for a
+#: 120 mm pivot spacing is 17.6 mm of boss at each end, and 130.08 mm is 5 mm at each end.
 ARM_STL_PLACEMENT: dict[str, dict] = {
-    "base": dict(frame="root", translate=(0.0, 0.0, 0.0), recenter_xy=True, zero_bottom=True),
+    "base": dict(frame="root", translate=(0.0, 0.0, 0.0),
+                 recenter_xy=True, recenter_z=False, zero_bottom=True, rot_x_deg=0.0),
     "turret": dict(frame="root", translate=(0.0, 0.0, BRACKET_T + SERVO_BODY[2]),
-                   recenter_xy=True, zero_bottom=True),
-    "upper_link": dict(frame="shoulder", translate=(0.0, 0.0, 0.0),
-                       recenter_xy=False, zero_bottom=False),
-    "fore_link": dict(frame="elbow", translate=(0.0, 0.0, 0.0),
-                      recenter_xy=False, zero_bottom=False),
+                   recenter_xy=True, recenter_z=False, zero_bottom=True, rot_x_deg=0.0),
+    "upper_link": dict(frame="shoulder", translate=("half_upper", 0.0, 0.0),
+                       recenter_xy=True, recenter_z=True, zero_bottom=False, rot_x_deg=90.0),
+    "fore_link": dict(frame="elbow", translate=("half_fore", 0.0, 0.0),
+                      recenter_xy=True, recenter_z=True, zero_bottom=False, rot_x_deg=0.0),
     "gripper_bracket": dict(frame="gripper", translate=(0.0, 0.0, 0.0),
-                            recenter_xy=False, zero_bottom=False),
+                            recenter_xy=True, recenter_z=True, zero_bottom=False, rot_x_deg=0.0),
 }
 
 
@@ -284,6 +305,7 @@ def build_arm(
     plate_top_local_z: float,
     stl_dir: str | None = None,
     notes: list[str] | None = None,
+    spec_plate_size: tuple[float, float] | None = None,
 ) -> ArmRig:
     """Author the arm on the custom top plate.
 
@@ -418,16 +440,37 @@ def build_arm(
             data = try_read(path)
             if data is None:
                 continue
+            # Symbolic offsets, resolved from the spec so the mesh lands on its segment midpoint
+            # rather than on a number typed in here.
+            tx = place["translate"][0]
+            if tx == "half_upper":
+                tx = 0.5 * spec.l_upper
+            elif tx == "half_fore":
+                tx = 0.5 * spec.l_fore
             mesh_path = f"{frames[place['frame']]}/{part}_stl"
             add_stl_mesh(
-                stage, mesh_path, data, scale=0.001, translate=place["translate"],
+                stage, mesh_path, data, scale=0.001,
+                translate=(tx, place["translate"][1], place["translate"][2]),
                 colour=_LINK, recenter_xy=place["recenter_xy"],
-                zero_bottom=place["zero_bottom"],
+                recenter_z=place["recenter_z"], zero_bottom=place["zero_bottom"],
+                rot_x_deg=place["rot_x_deg"],
             )
             for stand_in in procedural.get(part, ()):
                 _hide(stage, stand_in)
             if notes is not None:
                 notes.append(f"  {part}: {os.path.basename(path)} -- {data.describe(0.001)}")
+                if part == "base":
+                    lo, hi = data.bounds
+                    ext = (hi - lo) * 0.001
+                    plate = spec_plate_size
+                    if plate and (ext[0] > plate[0] or ext[1] > plate[1]):
+                        notes.append(
+                            f"  !! base STL is {ext[0] * 1000:.0f} x {ext[1] * 1000:.0f} mm but the "
+                            f"printed plate is {plate[0] * 1000:.0f} x {plate[1] * 1000:.0f} mm -- "
+                            f"it overhangs.  Either the arm is not bolted to this plate on the real "
+                            f"robot, or base_slim carries mounting wings that are trimmed in the "
+                            f"build.  Reported rather than hidden or silently scaled."
+                        )
 
     rig = ArmRig(
         spec=spec, root=root, base_rot=base_rot, shoulder_rot=shoulder_rot,

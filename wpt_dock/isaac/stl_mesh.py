@@ -18,6 +18,7 @@ Mesh colliders are the classic way to make a small simulation inexplicably slow.
 
 from __future__ import annotations
 
+import math
 import struct
 from dataclasses import dataclass
 
@@ -95,7 +96,9 @@ def add_stl_mesh(
     yaw: float = 0.0,
     colour: tuple[float, float, float] = (0.14, 0.14, 0.15),
     recenter_xy: bool = False,
+    recenter_z: bool = False,
     zero_bottom: bool = False,
+    rot_x_deg: float = 0.0,
 ) -> UsdGeom.Mesh:
     """Author the triangles as a ``UsdGeom.Mesh``.
 
@@ -111,12 +114,26 @@ def add_stl_mesh(
     measured from something meaningful rather than from an arbitrary CAD datum.
     """
     tris = stl.triangles * float(scale)
+
+    # Rotation about X, applied *before* any recentring so the recentre acts on the final
+    # orientation.  This exists because printed parts are exported in their **print** pose, not
+    # their assembled one: the arm's shoulder-to-elbow link is a 4 mm plate lying flat in XY,
+    # because that is how it goes on the bed with no supports.  Standing it up so its thickness
+    # is along the joint axis is a rigid rotation, not a modelling liberty.
+    if rot_x_deg:
+        a = math.radians(float(rot_x_deg))
+        ca, sa = math.cos(a), math.sin(a)
+        r = np.array([[1.0, 0.0, 0.0], [0.0, ca, -sa], [0.0, sa, ca]])
+        tris = tris @ r.T
+
     lo = tris.reshape(-1, 3).min(axis=0)
     hi = tris.reshape(-1, 3).max(axis=0)
     shift = np.zeros(3)
     if recenter_xy:
         shift[0] = -0.5 * (lo[0] + hi[0])
         shift[1] = -0.5 * (lo[1] + hi[1])
+    if recenter_z:
+        shift[2] = -0.5 * (lo[2] + hi[2])
     if zero_bottom:
         shift[2] = -lo[2]
     tris = tris + shift

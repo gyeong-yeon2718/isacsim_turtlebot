@@ -48,6 +48,7 @@ class PickPlaceRunner(SimulationRunner):
             plate_top_local_z=handles.plate_top_z - self.s.robot.wheel_radius,
             stl_dir=self.run.arm_stl_dir,
             notes=self._arm_notes,
+            spec_plate_size=(self.s.robot.plate_size[0], self.s.robot.plate_size[1]),
         )
         # The carry object owns the payload's transform ops, so it has to exist before the
         # payload is positioned.
