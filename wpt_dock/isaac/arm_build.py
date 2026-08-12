@@ -80,6 +80,22 @@ SERVO_FLANGE = (0.0322, 0.0122, 0.0025)  # m, the lugs the bracket bolts through
 SERVO_HORN_R = 0.0058                    # m, output disc radius
 BRACKET_T = 0.0025                       # m, printed wall thickness
 
+#: Rotation about X that brings ``gripper.stl`` from its print pose to its assembled pose.
+#:
+#: **Negative**, and the sign is the whole point.  Both +90 and -90 put the 8.20 mm horn bore
+#: vertical, so the bore alone cannot choose between them -- and the first attempt chose wrong.  The
+#: user reported the jaw upside down and asked for top and bottom swapped, which is this: the servo
+#: is mounted on top of the forearm bar and the jaw hangs *under* its horn, so the jaw body has to
+#: end up below the pivot rather than above it.
+JAW_ROT_X_DEG = -90.0
+
+#: The gripper servo's position along ``gripper_upper_arm.stl``, in metres from that part's near
+#: end.  MEASURED: the part has two Z-axis bores at x = 69.50 and x = 97.97, spaced 28.47 mm, which
+#: is the SG90's 28 mm flange-hole spacing -- so the body centre is their midpoint, 83.7 mm, and
+#: that is the cut-out the user meant by "구멍 뚫린 부분".  The procedural servo block is drawn there
+#: instead of at a guessed spot, so it sits in its pocket.
+SERVO_POCKET_X = 0.0837
+
 
 #: Logical arm part -> the upstream STL stems that provide it, most specific first.
 #:
@@ -465,6 +481,14 @@ def _mount_jaw_pair(stage, path: str, grip_path: str, spec: ArmSpec,
     # mesh: 1.80 mm at x = 8.08, 8.20 mm at x = 22.04, both on the same face at z = 11.5.
     # Using the small hole put the pivot 14 mm too far back and the tool point with it.
     piv_raw = (lo[0] + 22.04, lo[1] + 11.47, lo[2] + 0.5 * (hi[2] - lo[2]))
+    # Under -90 about X, (x, y, z) -> (x, z, -y); under +90 it is (x, -z, y).  Both put the 8.20 mm
+    # horn bore vertical, which is why picking the wrong one is easy and why the user saw the jaw
+    # upside down.  -90 is the one that hangs the jaw body *below* its pivot, which is where it
+    # goes: the servo is mounted on top of the forearm bar and the jaw hangs under the horn.
+    if JAW_ROT_X_DEG < 0:
+        piv = (piv_raw[0], piv_raw[2], -piv_raw[1])
+    else:
+        piv = (piv_raw[0], -piv_raw[2], piv_raw[1])
     # **Rotate the pivot with the mesh.**  ``add_stl_mesh`` turns the triangles by ``rot_x_deg``
     # first and only then applies ``translate``, so a pivot measured in the file's own frame is in
     # the wrong frame by the time it is used.  Under +90 degrees about X, (x, y, z) -> (x, -z, y).
@@ -477,7 +501,7 @@ def _mount_jaw_pair(stage, path: str, grip_path: str, spec: ArmSpec,
     add_stl_mesh(
         stage, f"{grip_path}/jaw_left/jaw_stl", data, scale=s,
         translate=(-piv[0] * s, -piv[1] * s, -piv[2] * s),
-        colour=_JAW, rot_x_deg=90.0,
+        colour=_JAW, rot_x_deg=JAW_ROT_X_DEG,
     )
     if notes is not None:
         notes.append(
@@ -588,10 +612,11 @@ def build_arm(
     xg.ClearXformOpOrder()
     xg.AddTranslateOp().Set(Gf.Vec3d(spec.l_fore, 0.0, 0.0))
     # --- gripper: servo in a bracket, driving two pivoting jaws -----------------------------
-    _u_bracket(stage, f"{grip_path}/bracket", span=SERVO_BODY[1], length=0.026, height=0.026,
-               centre=(0.002, 0.0, 0.0))
-    _servo(stage, f"{grip_path}/servo", (-0.002, 0.0, 0.0),
-           horn_axis="Y", horn_offset=0.5 * SERVO_BODY[1] + 0.003)
+    # The gripper servo, standing in its pocket with its shaft **up**, because the jaw pivots about
+    # a vertical axis.  Drawn at the gripper frame's origin, which is the horn axis, so it is where
+    # the hole in the forearm actually is rather than beside it.
+    _servo(stage, f"{grip_path}/servo", (0.0, 0.0, -0.5 * SERVO_BODY[2] - 0.002),
+           horn_axis="Z")
 
     # Jaw rest separations come from the spec, not from literals.  They used to be authored at
     # +-0.012 and then immediately overwritten by ``set_pose``, so the numbers in the file said
@@ -650,9 +675,13 @@ def build_arm(
             "jaw": (f"{grip_path}/jaw_left/hub", f"{grip_path}/jaw_left/arm",
                     f"{grip_path}/jaw_left/tip"),
             "upper_link": (f"{shoulder_path}/upper_link", f"{shoulder_path}/upper_link_far"),
+            # ``jaw_fixed`` is deliberately NOT hidden.  It is the surface the payload is held
+            # against, and hiding it on the assumption that the STL provides a hook at the same
+            # place left nothing at all at the tool point -- so the box appeared to be gripped in
+            # mid-air.  Keeping the stand-in means there is always something where the jaws close,
+            # and if the STL's own hook lands there too, they coincide rather than conflict.
             "fore_link": (f"{elbow_path}/fore_link", f"{elbow_path}/fore_link_far",
-                          f"{grip_path}/bracket", f"{grip_path}/jaw_fixed/arm",
-                          f"{grip_path}/jaw_fixed/hub"),
+                          f"{grip_path}/bracket"),
         }
         found, stl_notes = discover_arm_stls(stl_dir)
         if notes is not None:
