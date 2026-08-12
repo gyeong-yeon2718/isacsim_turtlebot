@@ -120,7 +120,55 @@ class ArmSpec:
     jaw_pad_thickness: float = 0.004  # m, matches the pad boxes in isaac/arm_build.py
     # How far past the object's surface the jaws are commanded, so contact carries real force.
     # DESIGN: printed PLA jaws on an SG90 flex about this much before the servo stalls.
+    # Corroborated by cute_arm's own README, which warns that ``gripper_close = 0`` puts the servo
+    # against a mechanical stopper and asks whether it overheats -- so closing onto the object
+    # rather than to the stop is what the hardware wants, not just what looks better.
     grip_squeeze: float = 0.0006      # m
+
+    # --- the gripper is a scissor pair, not parallel jaws ----------------------------------
+    #
+    # Each finger pivots on a **vertical 2 mm screw**.  That is measured, not assumed:
+    # ``gripper.stl`` contains exactly one circular bore, 1.90 mm across, and its axis lies along
+    # the file's Y with the bore passing through a 2 mm wall.  1.90 mm is a 2 mm screw from the
+    # BOM, not an SG90's 4.8 mm spline, so it is a pivot and not a drive shaft -- which is what the
+    # user meant by assembling these with screws.  Requiring that bore to end up vertical is also
+    # what finally fixes the part's assembled orientation: rotating the print pose 90 degrees about
+    # X takes the bore from Y to Z, and the same rotation turns the thin blade into a horizontal
+    # lever and the far plate into a 29 mm-tall vertical gripping face.  A scissor gripper.
+    #
+    # MEASURED from the mesh, in the rotated (assembled) frame:
+    #   bore centre        8.08 mm along the lever from the part's near end
+    #   gripping face      46..92 mm along the lever, so its middle is about 61 mm from the bore
+    jaw_lever: float = 0.061          # m, pivot -> middle of the gripping face
+
+    @property
+    def jaw_pivot_offset(self) -> float:
+        """Each pivot screw's lateral offset from the gripper centreline.
+
+        Derived, not chosen: it is half the fully-open pad separation, which makes the fully-open
+        pose exactly zero finger rotation and guarantees the closing angle is never negative.  As a
+        free constant it was 16 mm against a 34 mm open span, so "fully open" came out at -0.94
+        degrees -- a sign that the parameter was redundant rather than that the gripper opens
+        backwards.
+        """
+        return 0.5 * self.span_open
+
+    def jaw_rotation(self, opening: float) -> float:
+        """Angle each finger is turned about its vertical pivot, for a servo angle.
+
+        ``gripper_span`` stays the authority on what the pads are *doing* -- it is what
+        ``grip_angle_for`` inverts and what the tests pin -- and this converts that separation into
+        the rotation the mechanism uses to achieve it.  Positive closes.
+
+        Sign and geometry: at zero rotation the fingers are at their widest, ``2 *
+        jaw_pivot_offset`` apart; turning each one inward by ``theta`` brings its face in by
+        ``jaw_lever * sin(theta)``.  The long lever means the angles are small, which is exactly
+        why a 0.5-degree servo step is worth only a fraction of a millimetre at the pads -- the
+        mechanism is a reduction, and that is a point in the hardware's favour.
+        """
+        wanted = self.gripper_span(opening)
+        s = (2.0 * self.jaw_pivot_offset - wanted) / (2.0 * self.jaw_lever)
+        return math.asin(clamp(s, -1.0, 1.0))
 
     def gripper_span(self, opening: float) -> float:
         """Jaw pad **centre** separation for a gripper servo angle.

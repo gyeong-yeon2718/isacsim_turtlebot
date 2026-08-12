@@ -182,8 +182,11 @@ def _u_bracket(stage, path: str, *, span: float, length: float, height: float,
                 (cx - 0.5 * length + 0.5 * BRACKET_T, cy, cz), colour)
 
 
-def _jaw(stage, path: str, spec: ArmSpec) -> None:
-    """One finger: a pivot boss, an L-shaped finger, and the flat pad that touches the object.
+def _jaw(stage, path: str, spec: ArmSpec, sign: float = 1.0) -> None:
+    """One scissor finger: the vertical pivot screw, the lever, and the gripping face.
+
+    Authored in the finger's own frame, whose origin **is** the pivot screw, so the lever runs out
+    along +x and the face stands at the far end.  ``sign`` puts the face on the inner side.
 
     The pad is the one part whose dimensions are load bearing rather than cosmetic --
     ``jaw_pad_thickness`` is what makes the usable gap ``span - 4 mm``, and the grasp angle is
@@ -191,18 +194,22 @@ def _jaw(stage, path: str, spec: ArmSpec) -> None:
     the kinematics together.
     """
     t = spec.jaw_pad_thickness
-    # Pivot boss at the jaw's own origin, turning about Z with the finger.
-    add_cylinder(stage, f"{path}/pivot", 0.004, 0.010, (0.0, 0.0, 0.0), _JAW, axis="Z")
-    # The finger reaching forward, then the pad facing inward across the gap.
-    add_box(stage, f"{path}/finger", (0.020, t, 0.014), (0.011, 0.0, 0.0), _JAW)
-    # No collider here, and the reason is structural rather than a scope choice.  This pad hangs
+    # The 2 mm pivot screw, vertical, at the finger's origin -- the measured bore.
+    add_cylinder(stage, f"{path}/screw", 0.0010, 0.016, (0.0, 0.0, 0.0), _METAL, axis="Z")
+    add_cylinder(stage, f"{path}/boss", 0.0045, 0.004, (0.0, 0.0, 0.0), _JAW, axis="Z")
+    # The lever: a flat horizontal strip from the pivot out to the face.
+    add_box(stage, f"{path}/lever", (spec.jaw_lever, 0.020, 0.003),
+            (0.5 * spec.jaw_lever, 0.0, 0.0), _JAW)
+    # The gripping face: a tall plate standing at the end of the lever, on the inner side.
+    add_box(stage, f"{path}/face", (0.016, t, 0.029),
+            (spec.jaw_lever, -sign * (0.5 * t + 0.0015), 0.0145), _JAW)
+    # No collider on the face, and the reason is structural rather than a scope choice.  It hangs
     # off the arm, which hangs off the chassis -- an articulation link, i.e. a rigid body.  A
     # collider on that link whose *local* transform is rewritten every frame (the jaw separation
     # is) makes Kit re-enter its own tasking mutex: "Recursion not allowed",
     # carb/tasking/Mutex.cpp:103, a modal assertion that stops the process dead on the first
     # physics step.  The physical pads in ``build_pad_bodies`` exist precisely because collision
     # has to live outside the articulation, not inside it.
-    add_box(stage, f"{path}/pad", (0.014, t, 0.016), (0.021, 0.0, 0.0), _JAW)
 
 
 def _link_plate(stage, path: str, *, length: float, height: float, thickness: float,
@@ -259,9 +266,13 @@ class ArmRig:
         self.base_rot.Set(math.degrees(pose.base))
         self.shoulder_rot.Set(-math.degrees(pose.shoulder))
         self.elbow_rot.Set(-math.degrees(pose.elbow))
-        half = 0.5 * self.spec.gripper_span(gripper)
-        self.jaw_left.Set(Gf.Vec3d(0.0, half, 0.0))
-        self.jaw_right.Set(Gf.Vec3d(0.0, -half, 0.0))
+        # Scissor pair: each finger turns about its own vertical screw.  The frames sit at the
+        # fixed pivot offsets and it is the *rotation* that opens and closes the gripper -- the
+        # jaws no longer slide sideways, because the real ones cannot.  ``jaw_rotation`` converts
+        # the separation ``gripper_span`` asks for into that angle.
+        theta = math.degrees(self.spec.jaw_rotation(gripper))
+        self.jaw_left.Set(theta)
+        self.jaw_right.Set(-theta)
 
     def tcp_world(self, stage) -> Gf.Matrix4d:
         cache = UsdGeom.XformCache(Usd.TimeCode.Default())
@@ -569,21 +580,21 @@ def build_arm(
     # +-0.012 and then immediately overwritten by ``set_pose``, so the numbers in the file said
     # one thing and the scene showed another; anyone reading them would have inferred a 20 mm
     # gap that the mechanism never uses.
-    rest_half = 0.5 * spec.gripper_span(spec.gripper_open)
-    _jaw_bodies: list[str] = []
-    jaw_l = UsdGeom.Xform.Define(stage, Sdf.Path(f"{grip_path}/jaw_left"))
-    jl = UsdGeom.Xformable(jaw_l)
-    jl.ClearXformOpOrder()
-    jaw_left = jl.AddTranslateOp()
-    jaw_left.Set(Gf.Vec3d(0.0, rest_half, 0.0))
-    _jaw(stage, f"{grip_path}/jaw_left", spec)
-
-    jaw_r = UsdGeom.Xform.Define(stage, Sdf.Path(f"{grip_path}/jaw_right"))
-    jr = UsdGeom.Xformable(jaw_r)
-    jr.ClearXformOpOrder()
-    jaw_right = jr.AddTranslateOp()
-    jaw_right.Set(Gf.Vec3d(0.0, -rest_half, 0.0))
-    _jaw(stage, f"{grip_path}/jaw_right", spec)
+    # Each finger's frame sits **at its pivot screw** and carries a rotation, not a slide.  The
+    # pivot is where the force is applied and where the part is bolted, so putting the frame
+    # anywhere else -- as the sliding version did -- puts the whole mechanism's reference point in
+    # the wrong place, which is what the user saw.
+    jaws = []
+    for tag, sign in (("jaw_left", +1.0), ("jaw_right", -1.0)):
+        jx = UsdGeom.Xform.Define(stage, Sdf.Path(f"{grip_path}/{tag}"))
+        xj = UsdGeom.Xformable(jx)
+        xj.ClearXformOpOrder()
+        xj.AddTranslateOp().Set(Gf.Vec3d(0.0, sign * spec.jaw_pivot_offset, 0.0))
+        rot = xj.AddRotateZOp()
+        rot.Set(0.0)
+        jaws.append(rot)
+        _jaw(stage, f"{grip_path}/{tag}", spec, sign)
+    jaw_left, jaw_right = jaws
 
     # The tool centre point: where a grasped object's centre sits.  Between the jaws, out
     # along the forearm.  Everything about carrying and placing is expressed relative to

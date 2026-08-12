@@ -892,6 +892,30 @@ class TestArm(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.spec.grip_angle_for(closed_gap - 0.001)
 
+    def test_the_fingers_pivot_and_never_turn_backwards(self):
+        """The gripper is a scissor pair on vertical screws, so closing is a rotation.
+
+        ``gripper.stl`` has exactly one bore, 1.90 mm across -- a 2 mm screw from the BOM, not an
+        SG90's 4.8 mm spline -- so the fingers pivot on screws rather than sliding.  This pins the
+        two properties that make the mapping usable: fully open is exactly zero rotation, and
+        closing is monotone and positive.  Before ``jaw_pivot_offset`` was derived from
+        ``span_open`` it was a free constant and "fully open" came out at -0.94 degrees.
+        """
+        s = self.spec
+        self.assertAlmostEqual(s.jaw_pivot_offset, 0.5 * s.span_open, places=12)
+        self.assertAlmostEqual(s.jaw_rotation(s.gripper_open), 0.0, places=9,
+                               msg="fully open must be zero finger rotation")
+        prev = -1.0
+        for frac in (1.0, 0.75, 0.5, 0.25, 0.0):
+            theta = s.jaw_rotation(frac * s.gripper_open)
+            self.assertGreaterEqual(theta, -1e-12, "the fingers must never turn outwards")
+            self.assertGreater(theta, prev, "closing the servo must close the fingers")
+            prev = theta
+        # The long lever is a reduction: half a degree of servo is worth less at the pads.
+        d_servo = math.radians(0.5)
+        d_pad = abs(s.gripper_span(s.gripper_open) - s.gripper_span(s.gripper_open - d_servo))
+        self.assertLess(d_pad, 0.0005, "0.5 deg of servo should move the pads under 0.5 mm")
+
     def test_the_measured_coil_is_the_source_before_transit(self):
         """``current_coil`` must name the coil ``coil_errors`` is measured against.
 
