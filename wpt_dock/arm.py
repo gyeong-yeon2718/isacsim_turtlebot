@@ -158,10 +158,22 @@ class ArmSpec:
     #
     # This replaces a symmetric two-finger scissor model that was wrong in structure, not just in
     # numbers: it used two copies of the jaw and moved both.
-    jaw_pivot_x: float = 0.020        # m, gripper frame -> the servo horn the jaw turns on.  DESIGN
-    jaw_tip_reach: float = 0.084      # m, horn axis -> the jaw's tip.  MEASURED: gripper.stl is
-    #                                   92.16 mm long and its 1.90 mm bore sits 8.08 mm from the
-    #                                   near end, so the tip is 84.1 mm out from the pivot.
+    # Both MEASURED, and the measurement corrected an earlier guess twice over.
+    #
+    # ``gripper.stl`` has TWO bores along its Y, at the same height: a 1.80 mm screw hole at
+    # x = 8.08 and an **8.20 mm** hole at x = 22.04.  The user described exactly this -- two small
+    # circles and a slightly larger one in the middle -- and the larger one is the SG90 horn's
+    # spline boss, so *that* is the pivot.  An earlier revision used the 1.80 mm hole and put the
+    # pivot 14 mm too far back.
+    #
+    # ``gripper_upper_arm.stl`` is the forearm *and* the gripper's fixed half: 149 mm long, with
+    # the servo pocket cut between x = 104 and 134, so the horn axis lands near 120 mm from the
+    # elbow.  That is the documented ``LENGTH_ELBOW_GRIPPER = 12 cm``, which is a genuine
+    # cross-check rather than a coincidence -- the documented forearm length is measured to the
+    # gripper *servo*, not to the end of the part.  So the gripper frame already sits on the horn
+    # and the jaw pivots at that frame's origin.
+    jaw_pivot_x: float = 0.0          # m, gripper frame -> horn axis: they coincide
+    jaw_tip_reach: float = 0.0701     # m, horn axis -> tip.  92.16 - 22.04 from the mesh
 
     def jaw_rotation(self, opening: float) -> float:
         """Angle the **single** moving jaw is swung open, for a servo angle.  Zero is shut.

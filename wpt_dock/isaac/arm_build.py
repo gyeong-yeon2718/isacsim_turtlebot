@@ -87,10 +87,13 @@ BRACKET_T = 0.0025                       # m, printed wall thickness
 ARM_STL_STEMS: dict[str, tuple[str, ...]] = {
     "base": ("base_slim",),                    # the pedestal housing the base servo
     "turret": ("base_rotation",),              # turntable on the base servo's horn
-    "gripper_bracket": ("gripper_upper_arm",),  # resolved BEFORE fore_link, see above
     "upper_link": ("lower_arm",),              # shoulder -> elbow, 120 mm  (NOT "upper_arm")
-    "fore_link": ("upper_arm",),               # elbow -> gripper, 120 mm  (NOT "lower_arm")
-    "jaw": ("gripper",),                       # both jaws, probably in one mesh
+    # The forearm and the gripper's fixed half are ONE part.  The user was explicit: those two
+    # files alone implement the upper arm and the gripper, one of each.  So there is no separate
+    # wrist bracket to mount, and ``upper_arm.stl`` is deliberately not mapped here -- mapping it
+    # as the forearm, which an earlier revision did, put a spare link where the real arm has none.
+    "fore_link": ("gripper_upper_arm",),       # elbow -> gripper servo + the fixed jaw
+    "jaw": ("gripper",),                       # the single moving jaw, on the servo horn
 }
 
 #: Never loaded even if present.  The user's build omits the large base and the pen holder; the
@@ -351,10 +354,11 @@ ARM_STL_PLACEMENT: dict[str, dict] = {
                    recenter_xy=True, recenter_z=False, zero_bottom=True, rot_x_deg=0.0),
     "upper_link": dict(frame="shoulder", translate=("half_upper", 0.0, 0.0),
                        recenter_xy=True, recenter_z=True, zero_bottom=False, rot_x_deg=90.0),
+    # The forearm carries the gripper servo, so it is rotated the same 90 degrees about X that
+    # makes the jaw's horn bore vertical -- the two parts have to agree or the servo axis does not
+    # line up with the hole it sits in.
     "fore_link": dict(frame="elbow", translate=("half_fore", 0.0, 0.0),
-                      recenter_xy=True, recenter_z=True, zero_bottom=False, rot_x_deg=0.0),
-    "gripper_bracket": dict(frame="gripper", translate=(0.0, 0.0, 0.0),
-                            recenter_xy=True, recenter_z=True, zero_bottom=False, rot_x_deg=0.0),
+                      recenter_xy=True, recenter_z=True, zero_bottom=False, rot_x_deg=90.0),
 }
 
 
@@ -441,31 +445,28 @@ def _mount_jaw_pair(stage, path: str, grip_path: str, spec: ArmSpec,
     tris = data.triangles
     lo = tris.reshape(-1, 3).min(axis=0)
     hi = tris.reshape(-1, 3).max(axis=0)
-    # The pivot boss: the slice within 10 mm of the blade end.
-    near = tris.reshape(-1, 3)
-    near = near[near[:, 0] <= lo[0] + 10.0]
-    piv = (lo[0], 0.5 * (near[:, 1].min() + near[:, 1].max()),
-           0.5 * (near[:, 2].min() + near[:, 2].max()))
+    # The pivot is the **8.20 mm** bore, not the 1.80 mm one beside it: the big hole takes the
+    # SG90 horn's spline boss and the small one is a horn screw.  Measured positions, from the
+    # mesh: 1.80 mm at x = 8.08, 8.20 mm at x = 22.04, both on the same face at z = 11.5.
+    # Using the small hole put the pivot 14 mm too far back and the tool point with it.
+    piv = (lo[0] + 22.04, lo[1] + 11.47, lo[2] + 0.5 * (hi[2] - lo[2]), 4.10)
     s = 0.001
-    for tag, mirror in (("jaw_left", False), ("jaw_right", True)):
-        # Mirroring negates y, so the pivot's y offset has to be negated with it.
-        py = -piv[1] if mirror else piv[1]
-        add_stl_mesh(
-            stage, f"{grip_path}/{tag}/jaw_stl", data, scale=s,
-            translate=(-piv[0] * s, -py * s, -piv[2] * s),
-            colour=_JAW, mirror_y=mirror,
-        )
+    # ONE jaw, mounted once, on the moving frame.  The fixed half of the gripper is part of
+    # ``gripper_upper_arm.stl`` and is already there as the forearm.
+    add_stl_mesh(
+        stage, f"{grip_path}/jaw_left/jaw_stl", data, scale=s,
+        translate=(-piv[0] * s, -piv[1] * s, -piv[2] * s),
+        colour=_JAW, rot_x_deg=90.0,
+    )
     if notes is not None:
-        reach = (hi[0] - lo[0]) * s
         notes.append(
-            f"  jaw: {os.path.basename(path)} -- one connected component, not two, so it is a "
-            f"single finger mounted twice (mirrored).  {data.describe(s)}"
+            f"  jaw: {os.path.basename(path)} -- the single moving jaw, on the servo horn. "
+            f"pivot taken from the {2 * piv[3]:.2f} mm bore at x={piv[0] - lo[0]:.2f} mm. "
+            f"{data.describe(s)}"
         )
         notes.append(
-            f"  !! the jaw is {reach * 1000:.0f} mm from pivot to tip, but the model's tool centre "
-            f"point is {spec.l_tool * 1000:.0f} mm out.  Authored along +x as a default -- the "
-            f"files are a print-bed layout, not an assembly, so the blade's real angle is not "
-            f"recoverable from them.  If it looks wrong, the blade is angled on the real gripper."
+            f"  tool centre point {spec.l_tool * 1000:.1f} mm from the gripper mount = the tip "
+            f"contact, where the moving jaw meets the fixed one"
         )
 
 
@@ -626,8 +627,9 @@ def build_arm(
                     f"{grip_path}/jaw_left/pivot", f"{grip_path}/jaw_right/finger",
                     f"{grip_path}/jaw_right/pad", f"{grip_path}/jaw_right/pivot"),
             "upper_link": (f"{shoulder_path}/upper_link", f"{shoulder_path}/upper_link_far"),
-            "fore_link": (f"{elbow_path}/fore_link", f"{elbow_path}/fore_link_far"),
-            "gripper_bracket": (f"{grip_path}/bracket",),
+            "fore_link": (f"{elbow_path}/fore_link", f"{elbow_path}/fore_link_far",
+                          f"{grip_path}/bracket", f"{grip_path}/jaw_fixed/arm",
+                          f"{grip_path}/jaw_fixed/hub"),
         }
         found, stl_notes = discover_arm_stls(stl_dir)
         if notes is not None:
