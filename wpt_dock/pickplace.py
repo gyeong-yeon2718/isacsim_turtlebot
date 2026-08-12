@@ -212,12 +212,29 @@ class PickPlaceMission:
             )
         return self._status(0.0, 0.0, inner=status)
 
-    def _step_arm(self, control_pose: Pose, dt: float) -> PickPlaceStatus:
-        # Refresh the IK context every step from the pose the alignment *achieved*, not the
-        # one it was asked for.  The robot is stationary here, so this is cheap and it is the
-        # difference between the arm reaching for where it is and where it thinks it should be.
+    def advance_arm(self, control_pose: Pose, dt: float) -> ArmState:
+        """Move the servos on, at whatever rate the caller runs.  Separate from ``step`` on purpose.
+
+        The joints used to advance inside ``step``, which runs at ``SimSpec.control_hz`` -- 30 Hz.
+        Physics steps several times faster, so the arm and everything it carried moved in 33 ms
+        jumps and the payload visibly juddered.  Advancing the servos is *kinematics* and belongs
+        at the physics rate; deciding that a waypoint is done and the phase should change is
+        *supervision* and belongs at the control rate.  Splitting them is the fix, and it is also
+        the more honest arrangement -- a real servo does not wait for the controller's next tick.
+
+        Refreshes the IK context from the pose the alignment *achieved* rather than the one it was
+        asked for.  The robot is stationary here, so it is cheap, and it is the difference between
+        the arm reaching for where it is and where it thinks it should be.
+        """
+        if self.phase not in (PICK, PLACE):
+            return self.sequencer.state
         self.sequencer.set_ik_context(self._robot_pose(control_pose), self.plate_top_z)
-        state = self.sequencer.step(dt)
+        return self.sequencer.step(dt)
+
+    def _step_arm(self, control_pose: Pose, dt: float) -> PickPlaceStatus:
+        # The joints have already been advanced this frame by ``advance_arm``; this only decides
+        # what the result means.  Stepping the sequencer again here would double its rate.
+        state = self.sequencer.state
 
         if not self.sequencer.finished:
             self.message = f"{self.phase.lower()}: {state.message}"

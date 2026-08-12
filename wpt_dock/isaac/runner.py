@@ -251,6 +251,15 @@ class SimulationRunner:
         w = self.robot.get_wheel_velocities()
         return self.s.robot.wheels_to_body(float(w[0]), float(w[1]))
 
+    def _each_physics_step(self, dt: float, believed: Pose) -> None:
+        """Extension point, called every **physics** step.
+
+        Separate from ``_after_control`` because the two rates mean different things.  Anything
+        that is kinematics -- servos moving, a carried object following the gripper -- belongs here,
+        or it advances in control-period jumps and judders.  Anything that is a decision belongs in
+        ``_after_control``, at the rate the controller actually runs.
+        """
+
     def _after_control(self, dt: float) -> None:
         """Extension point, called once per control step after the wheels are commanded.
 
@@ -305,6 +314,13 @@ class SimulationRunner:
         if self._camera_accum >= camera_period:
             self._camera_accum = 0.0
             self.estimator.update(self.detector.detect(truth))
+
+        # Kinematics run every physics step, before the control block, so a subclass driving an
+        # arm sees the freshest estimate and moves smoothly rather than in control-period jumps.
+        # The estimate is only refreshed at the control rate, which is correct: the *sensor* is
+        # slow, the *servos* are not.
+        believed_now = compose(self.estimator.pose, (offset[0], offset[1], 0.0))
+        self._each_physics_step(step_size, believed_now)
 
         # Control cadence.
         self._control_accum += step_size

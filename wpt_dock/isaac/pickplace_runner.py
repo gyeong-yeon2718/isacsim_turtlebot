@@ -113,16 +113,31 @@ class PickPlaceRunner(SimulationRunner):
               f"TCP USD ({tw[0]:+.4f}, {tw[1]:+.4f}, {tw[2]:+.4f}) "
               f"chassis physics ({truth[0]:+.4f}, {truth[1]:+.4f})", flush=True)
 
-    # -- per control step ----------------------------------------------------
+    # -- per physics step ----------------------------------------------------
 
-    def _after_control(self, dt: float) -> None:
+    def _each_physics_step(self, dt: float, believed) -> None:
+        """Advance the servos and everything that rides on them, at the physics rate.
+
+        This used to happen in ``_after_control``, at ``control_hz`` = 30 Hz, while physics steps
+        several times faster -- so the arm and the payload it carried advanced in 33 ms jumps and
+        the box visibly juddered.  Servos are kinematics and belong here; the decisions about what
+        the arm has *achieved* stay at the control rate in ``_after_control``.
+        """
         if self.rig is None or self.carry is None or not isinstance(self.mission, PickPlaceMission):
             return
-        state = self.mission.arm_state
+        state = self.mission.advance_arm(believed, dt)
         self.rig.set_pose(state.pose, state.gripper)
         # The physical pads live outside the robot's prim tree, so USD does not compose their
-        # world poses -- they are driven here, every control step, right after the joints move.
+        # world poses -- they are driven here, right after the joints move.
         self.rig.drive_pads(self.stage)
+        self.carry.follow(self.rig)
+        self._grasp_events(state)
+
+    # -- per control step ----------------------------------------------------
+
+    def _grasp_events(self, state) -> None:
+        if self.rig is None or self.carry is None or not isinstance(self.mission, PickPlaceMission):
+            return
 
         # Grasp and release are driven by the *gripper's own angle*, not by a phase counter.
         # The jaws closing is the physical event; keying off anything else means the payload
@@ -148,11 +163,6 @@ class PickPlaceRunner(SimulationRunner):
             if self.run.verbose:
                 print(f"  [arm] t={self.t:6.2f}s released the payload", flush=True)
                 self._frame_report("release")
-
-        # Driven every step, held or not, so the anchor is already at the jaws when the joint
-        # is enabled.  Enabling a fixed joint whose bodies are apart snaps the payload across
-        # the scene.
-        self.carry.follow(self.rig)
 
     # -- reporting -----------------------------------------------------------
 
