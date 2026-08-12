@@ -193,16 +193,15 @@ def _jaw(stage, path: str, spec: ArmSpec, sign: float = 1.0) -> None:
     computed from it.  So it is taken from the spec, and changing it changes both the picture and
     the kinematics together.
     """
-    t = spec.jaw_pad_thickness
-    # The 2 mm pivot screw, vertical, at the finger's origin -- the measured bore.
-    add_cylinder(stage, f"{path}/screw", 0.0010, 0.016, (0.0, 0.0, 0.0), _METAL, axis="Z")
-    add_cylinder(stage, f"{path}/boss", 0.0045, 0.004, (0.0, 0.0, 0.0), _JAW, axis="Z")
-    # The lever: a flat horizontal strip from the pivot out to the face.
-    add_box(stage, f"{path}/lever", (spec.jaw_lever, 0.020, 0.003),
-            (0.5 * spec.jaw_lever, 0.0, 0.0), _JAW)
-    # The gripping face: a tall plate standing at the end of the lever, on the inner side.
-    add_box(stage, f"{path}/face", (0.016, t, 0.029),
-            (spec.jaw_lever, -sign * (0.5 * t + 0.0015), 0.0145), _JAW)
+    r = spec.jaw_tip_reach
+    # The vertical pivot -- the servo horn on the moving jaw, a screw on the fixed one.
+    add_cylinder(stage, f"{path}/hub", 0.0048, 0.005, (0.0, 0.0, 0.0), _METAL, axis="Z")
+    # A flat arm running out to the tip, thin in z, as the printed part is.
+    add_box(stage, f"{path}/arm", (r, 0.018, 0.004), (0.5 * r, 0.0, 0.0), _JAW)
+    # The hooked tip.  Both jaws' tips sit on the centreline so that at zero swing they meet --
+    # that is the structure the user described and photographed, and it is what puts the tool
+    # centre point at the tip rather than near the wrist.
+    add_box(stage, f"{path}/tip", (0.012, 0.010, 0.016), (r, 0.0, sign * 0.008), _JAW)
     # No collider on the face, and the reason is structural rather than a scope choice.  It hangs
     # off the arm, which hangs off the chassis -- an articulation link, i.e. a rigid body.  A
     # collider on that link whose *local* transform is rewritten every frame (the jaw separation
@@ -266,13 +265,10 @@ class ArmRig:
         self.base_rot.Set(math.degrees(pose.base))
         self.shoulder_rot.Set(-math.degrees(pose.shoulder))
         self.elbow_rot.Set(-math.degrees(pose.elbow))
-        # Scissor pair: each finger turns about its own vertical screw.  The frames sit at the
-        # fixed pivot offsets and it is the *rotation* that opens and closes the gripper -- the
-        # jaws no longer slide sideways, because the real ones cannot.  ``jaw_rotation`` converts
-        # the separation ``gripper_span`` asks for into that angle.
-        theta = math.degrees(self.spec.jaw_rotation(gripper))
-        self.jaw_left.Set(theta)
-        self.jaw_right.Set(-theta)
+        # One moving jaw, one fixed jaw.  Only ``jaw_left`` -- the part on the servo horn -- turns;
+        # the fixed jaw belongs to the bracket and has no op to write.  Zero is shut, tips
+        # touching, which is why the sign is positive to open.
+        self.jaw_left.Set(math.degrees(self.spec.jaw_rotation(gripper)))
 
     def tcp_world(self, stage) -> Gf.Matrix4d:
         cache = UsdGeom.XformCache(Usd.TimeCode.Default())
@@ -584,17 +580,25 @@ def build_arm(
     # pivot is where the force is applied and where the part is bolted, so putting the frame
     # anywhere else -- as the sliding version did -- puts the whole mechanism's reference point in
     # the wrong place, which is what the user saw.
-    jaws = []
-    for tag, sign in (("jaw_left", +1.0), ("jaw_right", -1.0)):
-        jx = UsdGeom.Xform.Define(stage, Sdf.Path(f"{grip_path}/{tag}"))
-        xj = UsdGeom.Xformable(jx)
-        xj.ClearXformOpOrder()
-        xj.AddTranslateOp().Set(Gf.Vec3d(0.0, sign * spec.jaw_pivot_offset, 0.0))
-        rot = xj.AddRotateZOp()
-        rot.Set(0.0)
-        jaws.append(rot)
-        _jaw(stage, f"{grip_path}/{tag}", spec, sign)
-    jaw_left, jaw_right = jaws
+    # The moving jaw: on the servo horn, turning about that horn's vertical axis.
+    mv = UsdGeom.Xform.Define(stage, Sdf.Path(f"{grip_path}/jaw_left"))
+    xm = UsdGeom.Xformable(mv)
+    xm.ClearXformOpOrder()
+    xm.AddTranslateOp().Set(Gf.Vec3d(spec.jaw_pivot_x, 0.0, 0.006))
+    jaw_left = xm.AddRotateZOp()
+    jaw_left.Set(0.0)
+    _jaw(stage, f"{grip_path}/jaw_left", spec, +1.0)
+
+    # The fixed jaw: part of the bracket, reaching forward to meet the moving one.  It gets a
+    # frame so the two are authored the same way, but nothing ever writes to it -- ``jaw_right``
+    # is kept only so ``ArmRig``'s shape does not change for callers.
+    fx = UsdGeom.Xform.Define(stage, Sdf.Path(f"{grip_path}/jaw_fixed"))
+    xfx = UsdGeom.Xformable(fx)
+    xfx.ClearXformOpOrder()
+    xfx.AddTranslateOp().Set(Gf.Vec3d(spec.jaw_pivot_x, 0.0, -0.004))
+    jaw_right = xfx.AddRotateZOp()
+    jaw_right.Set(0.0)
+    _jaw(stage, f"{grip_path}/jaw_fixed", spec, -1.0)
 
     # The tool centre point: where a grasped object's centre sits.  Between the jaws, out
     # along the forearm.  Everything about carrying and placing is expressed relative to

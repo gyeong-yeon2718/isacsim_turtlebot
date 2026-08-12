@@ -62,7 +62,18 @@ class ArmSpec:
     # place and pick came out 15-16 mm low, burying the box in the shelf, and the bias was
     # constant because it is geometry and not noise.  It matches the ``tcp`` prim in
     # ``isaac/arm_build.py``; the two must move together.
-    l_tool: float = 0.016            # m, gripper mount -> tool centre point
+    # Gripper mount -> the point a held object's centre sits at, along the forearm axis.
+    #
+    # **Derived from the jaw geometry, not a constant.**  It used to be 16 mm, which put the tool
+    # point just past the wrist -- nowhere near where this gripper actually holds anything.  The
+    # tips meet at ``jaw_pivot_x + jaw_tip_reach`` from the gripper mount, so that is where an
+    # object is gripped and that is the point the kinematics must aim.  Getting this wrong is not
+    # cosmetic: the IK solves for this point, so a tool offset that does not match the hardware
+    # moves every grasp and every placement by the difference.
+    @property
+    def l_tool(self) -> float:
+        """Gripper mount -> tool centre point: the tip contact, where the jaws meet."""
+        return self.jaw_pivot_x + self.jaw_tip_reach
 
     # ESTIMATED: neither repository documents the height from the mounting surface to the
     # shoulder pivot.  0.055 m is a typical SG90 base-rotation bracket plus shoulder
@@ -139,35 +150,32 @@ class ArmSpec:
     # MEASURED from the mesh, in the rotated (assembled) frame:
     #   bore centre        8.08 mm along the lever from the part's near end
     #   gripping face      46..92 mm along the lever, so its middle is about 61 mm from the bore
-    jaw_lever: float = 0.061          # m, pivot -> middle of the gripping face
-
-    @property
-    def jaw_pivot_offset(self) -> float:
-        """Each pivot screw's lateral offset from the gripper centreline.
-
-        Derived, not chosen: it is half the fully-open pad separation, which makes the fully-open
-        pose exactly zero finger rotation and guarantees the closing angle is never negative.  As a
-        free constant it was 16 mm against a 34 mm open span, so "fully open" came out at -0.94
-        degrees -- a sign that the parameter was redundant rather than that the gripper opens
-        backwards.
-        """
-        return 0.5 * self.span_open
+    # ONE moving jaw against ONE fixed jaw, and the tips meet when it shuts.  From the user's
+    # photographs of the built arm: ``gripper_upper_arm.stl`` is bolted to the forearm and does not
+    # move -- it reaches forward and its hooked tip *is* the fixed jaw.  ``gripper.stl``, of which
+    # there is exactly one, is screwed to the gripper servo's horn and swings about that horn's
+    # vertical axis.  One servo, one moving part, like a pair of pliers.
+    #
+    # This replaces a symmetric two-finger scissor model that was wrong in structure, not just in
+    # numbers: it used two copies of the jaw and moved both.
+    jaw_pivot_x: float = 0.020        # m, gripper frame -> the servo horn the jaw turns on.  DESIGN
+    jaw_tip_reach: float = 0.084      # m, horn axis -> the jaw's tip.  MEASURED: gripper.stl is
+    #                                   92.16 mm long and its 1.90 mm bore sits 8.08 mm from the
+    #                                   near end, so the tip is 84.1 mm out from the pivot.
 
     def jaw_rotation(self, opening: float) -> float:
-        """Angle each finger is turned about its vertical pivot, for a servo angle.
+        """Angle the **single** moving jaw is swung open, for a servo angle.  Zero is shut.
 
-        ``gripper_span`` stays the authority on what the pads are *doing* -- it is what
-        ``grip_angle_for`` inverts and what the tests pin -- and this converts that separation into
-        the rotation the mechanism uses to achieve it.  Positive closes.
+        ``gripper_span`` stays the authority on the opening -- it is what ``grip_angle_for``
+        inverts and what the tests pin -- and this converts that gap into the swing that produces
+        it.  Because the tips meet when closed, the gap *is* the tip's lateral travel, so
+        ``gap = jaw_tip_reach * sin(theta)`` and nothing else enters.
 
-        Sign and geometry: at zero rotation the fingers are at their widest, ``2 *
-        jaw_pivot_offset`` apart; turning each one inward by ``theta`` brings its face in by
-        ``jaw_lever * sin(theta)``.  The long lever means the angles are small, which is exactly
-        why a 0.5-degree servo step is worth only a fraction of a millimetre at the pads -- the
-        mechanism is a reduction, and that is a point in the hardware's favour.
+        The consequence worth noticing: an 84 mm jaw opening 30 mm needs 21 degrees of swing, so
+        the servo's half-degree resolution is worth about 0.7 mm at the tip.  That is a real
+        limitation of the mechanism rather than of the model.
         """
-        wanted = self.gripper_span(opening)
-        s = (2.0 * self.jaw_pivot_offset - wanted) / (2.0 * self.jaw_lever)
+        s = self.gripper_span(opening) / self.jaw_tip_reach
         return math.asin(clamp(s, -1.0, 1.0))
 
     def gripper_span(self, opening: float) -> float:

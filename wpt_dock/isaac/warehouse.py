@@ -236,6 +236,7 @@ def best_station_centre(
     turn_points: tuple[tuple[float, float], ...] = (),
     clearance: float = 0.010,
     base_margin: float = math.radians(15.0),
+    reach_margin: float = 0.008,
 ) -> tuple[tuple[float, float], str]:
     """Where in the margin is the grasp best conditioned?  Searched, not guessed.
 
@@ -357,6 +358,15 @@ def best_station_centre(
                 rejected["base"] += 1
                 continue
             d = math.sqrt(sum(v * v for v in grasp))
+            # Reserve reach as well as base travel, and for the same reason.  Once the tool point
+            # moved out to the jaw tips the arm's best-conditioned distance (254 mm) sits *beyond*
+            # its usable reach (230 mm), so "closest to the optimum" pushes every candidate onto
+            # the ceiling: the search returned 229.9 mm and the run then failed at 23.1 cm,
+            # 1 mm over, as soon as the real docking error was added on top.  The margin is what
+            # makes a build-time answer survive a run.
+            if d > arm.reach_max - reach_margin:
+                rejected["ik"] += 1
+                continue
             manip = manip_max * abs(math.sin(g.pose.elbow))
             # Closest to the optimum distance; manipulability breaks ties.
             key = (round(abs(d - d_opt), 6), -manip)

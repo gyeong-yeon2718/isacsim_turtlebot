@@ -815,8 +815,17 @@ class TestArm(unittest.TestCase):
         )
         self.assertGreater(staged, 0.010,
                            f"lift-then-slew must clear the deck, got {staged * 1000:.1f} mm")
-        self.assertGreater(staged, direct,
-                           "staging has to beat the direct move or it is pointless")
+        if math.isinf(direct) and math.isinf(staged):
+            # Both infinite means neither path passes over the plate *at all*, so there is no
+            # conflict left for staging to solve.  That is what the real gripper's geometry did:
+            # once the tool centre point moved out to the jaw tips at 104 mm, the payload is
+            # carried beyond the deck footprint the whole way.  Worth asserting as a fact rather
+            # than forcing the old comparison, which would now be comparing two absences.
+            self.assertGreater(self.spec.l_tool, 0.050,
+                               "the conflict only disappears because the tool point is far out")
+        else:
+            self.assertGreater(staged, direct,
+                               "staging has to beat the direct move or it is pointless")
 
     def test_kinematics_solve_for_the_tool_centre_point_not_the_wrist(self):
         """``forward_kinematics`` must reach the point the USD ``tcp`` prim marks.
@@ -902,19 +911,27 @@ class TestArm(unittest.TestCase):
         ``span_open`` it was a free constant and "fully open" came out at -0.94 degrees.
         """
         s = self.spec
-        self.assertAlmostEqual(s.jaw_pivot_offset, 0.5 * s.span_open, places=12)
-        self.assertAlmostEqual(s.jaw_rotation(s.gripper_open), 0.0, places=9,
-                               msg="fully open must be zero finger rotation")
-        prev = -1.0
+        # Closing the servo must close the jaw, monotonically, and never swing it inside the
+        # fixed jaw.
+        prev = 1e9
         for frac in (1.0, 0.75, 0.5, 0.25, 0.0):
             theta = s.jaw_rotation(frac * s.gripper_open)
-            self.assertGreaterEqual(theta, -1e-12, "the fingers must never turn outwards")
-            self.assertGreater(theta, prev, "closing the servo must close the fingers")
+            self.assertGreaterEqual(theta, 0.0, "the jaw must not swing past shut")
+            self.assertLess(theta, prev, "closing the servo must close the jaw")
             prev = theta
-        # The long lever is a reduction: half a degree of servo is worth less at the pads.
-        d_servo = math.radians(0.5)
-        d_pad = abs(s.gripper_span(s.gripper_open) - s.gripper_span(s.gripper_open - d_servo))
-        self.assertLess(d_pad, 0.0005, "0.5 deg of servo should move the pads under 0.5 mm")
+
+        # The tool centre point is the tip contact, not a number near the wrist.  This is the
+        # "force application point" the user kept reporting as wrong: the IK aims at l_tool, so if
+        # it does not sit where the jaws actually meet, every grasp is off by the difference.
+        self.assertAlmostEqual(s.l_tool, s.jaw_pivot_x + s.jaw_tip_reach, places=12)
+        self.assertGreater(s.l_tool, 0.050,
+                           "a tool point near the wrist cannot be where this gripper holds things")
+
+        # The gap is purely the tip's lateral travel, because the tips meet when shut.
+        for frac in (0.25, 0.5, 1.0):
+            a = frac * s.gripper_open
+            self.assertAlmostEqual(s.jaw_tip_reach * math.sin(s.jaw_rotation(a)),
+                                   s.gripper_span(a), places=9)
 
     def test_the_measured_coil_is_the_source_before_transit(self):
         """``current_coil`` must name the coil ``coil_errors`` is measured against.
