@@ -686,11 +686,18 @@ class TestArm(unittest.TestCase):
         from wpt_dock.arm import HOME, forward_kinematics
 
         tip = forward_kinematics(self.spec, HOME)
-        self.assertAlmostEqual(tip[0], self.spec.distal, places=9)      # 0.120 wrist + 0.016 tool
+        self.assertAlmostEqual(tip[0], self.spec.distal, places=9)
         self.assertAlmostEqual(tip[1], 0.000, places=9)
-        self.assertAlmostEqual(tip[2], self.spec.l_upper, places=9)     # upper arm straight up
-        # The published number itself, at the point it was published for.
-        self.assertAlmostEqual(tip[0] - self.spec.l_tool, 0.120, places=9)
+        # The vertical figure is the one that matches exactly, because it is a link length with no
+        # ambiguity about its endpoints: the upper arm is straight up at HOME.
+        self.assertAlmostEqual(tip[2], self.spec.l_upper, places=9)
+
+        # The horizontal figure does *not* come out at 12.0 cm, and that is deliberate.  Upstream
+        # publishes both the rest position and LENGTH_ELBOW_GRIPPER as 12 cm without saying which
+        # point on the gripper they measure to, and the user resolved it: the point where the
+        # gripper applies force is inboard of 120 mm.  So 12 cm is the bound this stays under.
+        self.assertLess(tip[0], 0.120)
+        self.assertGreater(tip[0], 0.100, "and it should not be far under it either")
 
     def test_ik_inverts_fk_over_the_workspace(self):
         from wpt_dock.arm import forward_kinematics, solve_ik
@@ -919,6 +926,14 @@ class TestArm(unittest.TestCase):
             self.assertGreaterEqual(theta, 0.0, "the jaw must not swing past shut")
             self.assertLess(theta, prev, "closing the servo must close the jaw")
             prev = theta
+
+        # Elbow to the force point must stay inside the documented 12 cm.  The documentation gives
+        # that as an upper bound on the forearm; reading it as elbow-to-servo and then adding the
+        # jaw's own 70 mm produced a 190 mm forearm, longer than the whole documented segment.
+        self.assertLess(s.distal, 0.120,
+                        "the gripper's force point is inboard of the documented 12 cm")
+        self.assertAlmostEqual(s.distal, s.elbow_to_tool, places=12)
+        self.assertGreater(s.l_fore, 0.0, "the forearm cannot be shorter than the jaw it carries")
 
         # The tool centre point is the tip contact, not a number near the wrist.  This is the
         # "force application point" the user kept reporting as wrong: the IK aims at l_tool, so if

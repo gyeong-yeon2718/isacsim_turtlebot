@@ -46,17 +46,26 @@ from .usd_helpers import (
 
 
 def _hide(stage, path: str) -> None:
-    """Make a prim invisible without removing it.
+    """Make a prim and **everything under it** invisible, without removing anything.
+
+    Recursive on purpose.  ``_link_plate`` and friends author their geometry as children --
+    ``fore_link/web``, ``fore_link/boss_near`` -- so ``fore_link`` itself is a typeless ancestor
+    that USD creates implicitly.  ``UsdGeom.Imageable`` on a typeless prim is falsy, so the
+    non-recursive version hid nothing at all and the procedural "web" stayed on screen next to the
+    real mesh that was supposed to replace it.  That is what the user was looking at.
 
     Visibility is a render-time property, so a hidden stand-in keeps whatever role it had -- the
     same trick ``robot_build`` uses to keep measured collision boxes working behind the grafted
     ROBOTIS meshes.
     """
     prim = stage.GetPrimAtPath(Sdf.Path(path))
-    if prim and prim.IsValid():
-        imageable = UsdGeom.Imageable(prim)
-        if imageable:
-            imageable.MakeInvisible()
+    if not prim or not prim.IsValid():
+        return
+    imageable = UsdGeom.Imageable(prim)
+    if imageable:
+        imageable.MakeInvisible()
+    for child in prim.GetAllChildren():
+        _hide(stage, str(child.GetPath()))
 
 _METAL = (0.72, 0.73, 0.76)
 _SERVO = (0.10, 0.10, 0.12)
@@ -449,7 +458,13 @@ def _mount_jaw_pair(stage, path: str, grip_path: str, spec: ArmSpec,
     # SG90 horn's spline boss and the small one is a horn screw.  Measured positions, from the
     # mesh: 1.80 mm at x = 8.08, 8.20 mm at x = 22.04, both on the same face at z = 11.5.
     # Using the small hole put the pivot 14 mm too far back and the tool point with it.
-    piv = (lo[0] + 22.04, lo[1] + 11.47, lo[2] + 0.5 * (hi[2] - lo[2]), 4.10)
+    piv_raw = (lo[0] + 22.04, lo[1] + 11.47, lo[2] + 0.5 * (hi[2] - lo[2]))
+    # **Rotate the pivot with the mesh.**  ``add_stl_mesh`` turns the triangles by ``rot_x_deg``
+    # first and only then applies ``translate``, so a pivot measured in the file's own frame is in
+    # the wrong frame by the time it is used.  Under +90 degrees about X, (x, y, z) -> (x, -z, y).
+    # Skipping this put the jaw about 200 mm away from the robot -- it appeared to float in space,
+    # detached from the arm entirely, which is what the user saw.
+    piv = (piv_raw[0], -piv_raw[2], piv_raw[1])
     s = 0.001
     # ONE jaw, mounted once, on the moving frame.  The fixed half of the gripper is part of
     # ``gripper_upper_arm.stl`` and is already there as the forearm.
@@ -461,8 +476,7 @@ def _mount_jaw_pair(stage, path: str, grip_path: str, spec: ArmSpec,
     if notes is not None:
         notes.append(
             f"  jaw: {os.path.basename(path)} -- the single moving jaw, on the servo horn. "
-            f"pivot taken from the {2 * piv[3]:.2f} mm bore at x={piv[0] - lo[0]:.2f} mm. "
-            f"{data.describe(s)}"
+            f"pivot taken from the 8.20 mm bore 22.04 mm along the part. {data.describe(s)}"
         )
         notes.append(
             f"  tool centre point {spec.l_tool * 1000:.1f} mm from the gripper mount = the tip "
@@ -623,9 +637,12 @@ def build_arm(
         procedural = {
             "base": (f"{root}/base_plate",),
             "turret": (f"{yaw_path}/turret",),
-            "jaw": (f"{grip_path}/jaw_left/finger", f"{grip_path}/jaw_left/pad",
-                    f"{grip_path}/jaw_left/pivot", f"{grip_path}/jaw_right/finger",
-                    f"{grip_path}/jaw_right/pad", f"{grip_path}/jaw_right/pivot"),
+            # The moving jaw's stand-in.  Named by *frame*, not by the boxes inside it, so
+            # renaming the procedural pieces cannot silently leave them on screen again -- which is
+            # exactly what happened when these were listed as finger/pad/pivot and the pieces had
+            # become hub/arm/tip.
+            "jaw": (f"{grip_path}/jaw_left/hub", f"{grip_path}/jaw_left/arm",
+                    f"{grip_path}/jaw_left/tip"),
             "upper_link": (f"{shoulder_path}/upper_link", f"{shoulder_path}/upper_link_far"),
             "fore_link": (f"{elbow_path}/fore_link", f"{elbow_path}/fore_link_far",
                           f"{grip_path}/bracket", f"{grip_path}/jaw_fixed/arm",

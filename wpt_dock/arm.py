@@ -50,7 +50,24 @@ class ArmSpec:
     """Geometry and limits.  MEASURED unless marked otherwise."""
 
     l_upper: float = 0.120           # m, shoulder -> elbow, MEASURED (both repos)
-    l_fore: float = 0.120            # m, elbow -> gripper, MEASURED (both repos)
+
+    # Elbow -> the point the gripper actually applies force, i.e. the jaw tips.
+    #
+    # The user's constraint, and it settles an ambiguity the documentation cannot: the documented
+    # ``LENGTH_ELBOW_GRIPPER = 12 cm`` is an upper bound on this, not a measurement of it -- the
+    # force point is **inboard of 120 mm**.  An earlier revision read the 12 cm as elbow-to-servo
+    # and then added the jaw's 70 mm on top, which put the tool point 190 mm out: over the whole
+    # documented forearm and then some.
+    #
+    # ``l_fore`` is what remains for elbow -> servo horn once the measured jaw is accounted for, so
+    # the split is derived and only this one number is a choice.  It wants one measurement from the
+    # hardware -- elbow pivot to the jaw tips with the gripper shut -- and then it is exact.
+    elbow_to_tool: float = 0.112     # m, < 120 mm.  USER-CONSTRAINED, awaiting one measurement
+
+    @property
+    def l_fore(self) -> float:
+        """Elbow -> gripper servo horn.  Whatever is left after the jaw's own reach."""
+        return self.elbow_to_tool - self.jaw_tip_reach
     reach_min: float = 0.030         # m, MEASURED (documented usable minimum)
     reach_max: float = 0.230         # m, MEASURED (documented usable maximum)
 
