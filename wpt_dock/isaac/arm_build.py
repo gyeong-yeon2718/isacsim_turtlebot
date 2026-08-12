@@ -363,11 +363,17 @@ ARM_STL_PLACEMENT: dict[str, dict] = {
                    recenter_xy=True, recenter_z=False, zero_bottom=True, rot_x_deg=0.0),
     "upper_link": dict(frame="shoulder", translate=("half_upper", 0.0, 0.0),
                        recenter_xy=True, recenter_z=True, zero_bottom=False, rot_x_deg=90.0),
-    # The forearm carries the gripper servo, so it is rotated the same 90 degrees about X that
-    # makes the jaw's horn bore vertical -- the two parts have to agree or the servo axis does not
-    # line up with the hole it sits in.
+    # The forearm is NOT rotated, and the two parts differing is correct rather than sloppy: they
+    # are printed in different orientations, and each one's rotation is set by where its own holes
+    # point.  ``gripper_upper_arm.stl`` already carries a **Z-axis** bore (1.80 mm, 12 mm deep, at
+    # x = 98.06) in its print pose, so its servo axis is vertical at zero rotation.  ``gripper.stl``
+    # carries its 8.20 mm horn bore along **Y**, so that one needs 90 degrees about X.
+    #
+    # Giving the forearm the jaw's 90 degrees -- on the assumption that parts of one assembly share
+    # an orientation -- turned its wide face to the sky.  The user asked for it back by 90 degrees
+    # counter-clockwise, which is this: zero.
     "fore_link": dict(frame="elbow", translate=("half_fore", 0.0, 0.0),
-                      recenter_xy=True, recenter_z=True, zero_bottom=False, rot_x_deg=90.0),
+                      recenter_xy=True, recenter_z=True, zero_bottom=False, rot_x_deg=0.0),
 }
 
 
