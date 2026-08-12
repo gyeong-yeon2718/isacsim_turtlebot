@@ -49,10 +49,18 @@ class PickPlaceRunner(SimulationRunner):
             stl_dir=self.run.arm_stl_dir,
             notes=self._arm_notes,
             spec_plate_size=(self.s.robot.plate_size[0], self.s.robot.plate_size[1]),
+            physical_grasp=self.run.physical_grasp,
         )
         # The carry object owns the payload's transform ops, so it has to exist before the
         # payload is positioned.
-        self.carry = GripperAttachment(stage, self.warehouse.payload_path)
+        # The pads are part of the robot, so they must not collide with it -- and they have to be
+        # put where the gripper is before the first physics step, or they spawn at the world origin
+        # (which is coil 1, i.e. inside the robot) and launch it.
+        self.rig.exclude_pads_from(stage, handles.prim_path)
+        self.rig.drive_pads(stage)
+
+        self.carry = GripperAttachment(stage, self.warehouse.payload_path,
+                                       physical_grasp=self.run.physical_grasp)
         self.carry.exclude_from_collision_with(handles.prim_path)
         # Spawned 1 mm clear of the rollers rather than exactly in contact.  The payload is a
         # dynamic body now, so it drops that millimetre in about 14 ms and is at rest long
@@ -112,6 +120,9 @@ class PickPlaceRunner(SimulationRunner):
             return
         state = self.mission.arm_state
         self.rig.set_pose(state.pose, state.gripper)
+        # The physical pads live outside the robot's prim tree, so USD does not compose their
+        # world poses -- they are driven here, every control step, right after the joints move.
+        self.rig.drive_pads(self.stage)
 
         # Grasp and release are driven by the *gripper's own angle*, not by a phase counter.
         # The jaws closing is the physical event; keying off anything else means the payload

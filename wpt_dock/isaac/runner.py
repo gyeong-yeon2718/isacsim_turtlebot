@@ -64,6 +64,10 @@ class RunConfig:
     # pick-and-place runner passes it to ``build_arm``, which falls back to procedural geometry
     # for any part it cannot find.
     arm_stl_dir: str | None = None
+    # Contact-and-friction grasp instead of a kinematic carry.  Off because it does not work yet:
+    # with the pad bodies present PhysX dies on the first physics step.  See
+    # ``arm_build.build_pad_bodies`` for what was ruled out and what is left to try.
+    physical_grasp: bool = False
     log_path: str | None = None
     verbose: bool = True
 

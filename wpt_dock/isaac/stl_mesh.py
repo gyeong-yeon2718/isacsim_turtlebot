@@ -99,6 +99,7 @@ def add_stl_mesh(
     recenter_z: bool = False,
     zero_bottom: bool = False,
     rot_x_deg: float = 0.0,
+    mirror_y: bool = False,
 ) -> UsdGeom.Mesh:
     """Author the triangles as a ``UsdGeom.Mesh``.
 
@@ -114,6 +115,16 @@ def add_stl_mesh(
     measured from something meaningful rather than from an arbitrary CAD datum.
     """
     tris = stl.triangles * float(scale)
+
+    # Mirror in Y, **with the winding reversed**.  A printed gripper of this kind uses two copies
+    # of one jaw facing each other, so the second one is the first one mirrored.  Negating y alone
+    # would invert every triangle's winding and the part would render inside-out; swapping two
+    # corners of each triangle restores outward normals, which is why this is not just a negative
+    # scale on the prim.
+    if mirror_y:
+        tris = tris.copy()
+        tris[:, :, 1] *= -1.0
+        tris = tris[:, ::-1, :]
 
     # Rotation about X, applied *before* any recentring so the recentre acts on the final
     # orientation.  This exists because printed parts are exported in their **print** pose, not

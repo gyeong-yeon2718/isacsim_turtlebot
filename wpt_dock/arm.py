@@ -118,6 +118,9 @@ class ArmSpec:
     span_closed: float = 0.006       # m, pad centre separation at gripper_closed
     span_open: float = 0.034         # m, pad centre separation at gripper_open
     jaw_pad_thickness: float = 0.004  # m, matches the pad boxes in isaac/arm_build.py
+    # How far past the object's surface the jaws are commanded, so contact carries real force.
+    # DESIGN: printed PLA jaws on an SG90 flex about this much before the servo stalls.
+    grip_squeeze: float = 0.0006      # m
 
     def gripper_span(self, opening: float) -> float:
         """Jaw pad **centre** separation for a gripper servo angle.
@@ -518,7 +521,15 @@ def pick_sequence(grasp_point: tuple[float, float, float], spec: ArmSpec,
     above = (grasp_point[0], grasp_point[1], grasp_point[2] + approach)
     # Close onto the object, not to the mechanical stop.  ``grip_angle_for`` refuses an object
     # the jaws cannot span, so an unsuitable payload fails here rather than being mimed.
-    close_to = spec.gripper_closed if grip_width is None else spec.grip_angle_for(grip_width)
+    #
+    # ``squeeze`` matters once the grasp is a contact grasp: commanding exactly the box's width
+    # leaves the pads just touching, contact force near zero, and friction with nothing to work
+    # against -- the box slides out.  A position-controlled servo does not stop at the surface, it
+    # drives *into* it and stalls, and the printed jaw flexes.  0.6 mm of overlap is what turns
+    # "the pads are adjacent to the box" into "the pads are holding the box".
+    close_to = (spec.gripper_closed if grip_width is None
+                else spec.grip_angle_for(max(spec.gripper_clear(spec.gripper_closed),
+                                             grip_width - spec.grip_squeeze)))
     return [
         Waypoint("open the gripper", gripper=spec.gripper_open),
         Waypoint("reach above the object", world_target=above, settle=0.2),

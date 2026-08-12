@@ -116,8 +116,12 @@ class PickPlaceMission:
         # The width the jaws must close onto.  ``None`` means "close to the mechanical stop",
         # which is only right when there is nothing in the jaws.
         self.payload_width = payload_width
+        # The angle the sequence actually commands, squeeze included, so the runner's "closed"
+        # test matches what the jaws are told to do rather than where the object surface is.
         self.grip_angle = (
-            arm.gripper_closed if payload_width is None else arm.grip_angle_for(payload_width)
+            arm.gripper_closed if payload_width is None
+            else arm.grip_angle_for(max(arm.gripper_clear(arm.gripper_closed),
+                                        payload_width - arm.grip_squeeze))
         )
 
         route = plan_route(settings.board, self.source_coil, self.target_coil)

@@ -35,7 +35,14 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 
 from ..arm import ArmPose, ArmSpec
 from .stl_mesh import add_stl_mesh, try_read
-from .usd_helpers import add_box, add_cylinder, set_display_colour, set_transform
+from .usd_helpers import (
+    add_box,
+    add_cylinder,
+    add_physics_material,
+    bind_physics_material,
+    set_display_colour,
+    set_transform,
+)
 
 
 def _hide(stage, path: str) -> None:
@@ -188,6 +195,13 @@ def _jaw(stage, path: str, spec: ArmSpec) -> None:
     add_cylinder(stage, f"{path}/pivot", 0.004, 0.010, (0.0, 0.0, 0.0), _JAW, axis="Z")
     # The finger reaching forward, then the pad facing inward across the gap.
     add_box(stage, f"{path}/finger", (0.020, t, 0.014), (0.011, 0.0, 0.0), _JAW)
+    # No collider here, and the reason is structural rather than a scope choice.  This pad hangs
+    # off the arm, which hangs off the chassis -- an articulation link, i.e. a rigid body.  A
+    # collider on that link whose *local* transform is rewritten every frame (the jaw separation
+    # is) makes Kit re-enter its own tasking mutex: "Recursion not allowed",
+    # carb/tasking/Mutex.cpp:103, a modal assertion that stops the process dead on the first
+    # physics step.  The physical pads in ``build_pad_bodies`` exist precisely because collision
+    # has to live outside the articulation, not inside it.
     add_box(stage, f"{path}/pad", (0.014, t, 0.016), (0.021, 0.0, 0.0), _JAW)
 
 
@@ -225,6 +239,10 @@ class ArmRig:
     jaw_left: UsdGeom.XformOp
     jaw_right: UsdGeom.XformOp
     tcp_path: str
+    grip_path: str = ""
+    #: World-space pad bodies, ``(translate_op, orient_op, sign)`` per side.  These exist outside
+    #: the robot's prim tree on purpose -- see ``build_pad_bodies``.
+    pads: tuple = ()
     pose: ArmPose = field(default=ArmPose(0.0, 0.0, 0.0))
     gripper: float = 0.0
 
@@ -248,6 +266,42 @@ class ArmRig:
     def tcp_world(self, stage) -> Gf.Matrix4d:
         cache = UsdGeom.XformCache(Usd.TimeCode.Default())
         return cache.GetLocalToWorldTransform(stage.GetPrimAtPath(Sdf.Path(self.tcp_path)))
+
+    def exclude_pads_from(self, stage, prim_path: str) -> None:
+        """Stop the pads colliding with the robot they are part of.
+
+        Not optional.  The pads are kinematic, which in PhysX means infinitely massive, and they
+        are *inside* the robot's own volume by construction -- so every pad-versus-robot contact
+        is spurious and each one kicks the articulation.  Left unfiltered they threw the robot to
+        (-0.095, 0.109) at -156 degrees within six seconds; the emergency-stop guard caught it,
+        which is the only reason it read as a mission failure rather than a mystery.
+        """
+        from pxr import UsdPhysics as _UP
+
+        for translate, _orient, _sign, _x in self.pads:
+            prim = translate.GetAttr().GetPrim()
+            api = _UP.FilteredPairsAPI.Apply(prim)
+            api.CreateFilteredPairsRel().AddTarget(Sdf.Path(prim_path))
+
+    def drive_pads(self, stage) -> None:
+        """Put the two physical pads where the gripper's jaws are, in world space.
+
+        Called every control step, after ``set_pose``.  The pads cannot live under the gripper
+        prim -- see ``build_pad_bodies`` -- so their world poses are recomputed from the gripper
+        frame each step instead of being composed by USD.
+        """
+        if not self.pads:
+            return
+        cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+        m = cache.GetLocalToWorldTransform(stage.GetPrimAtPath(Sdf.Path(self.grip_path)))
+        rot = m.ExtractRotationQuat()
+        quat = Gf.Quatf(float(rot.GetReal()), *[float(v) for v in rot.GetImaginary()])
+        half = 0.5 * self.spec.gripper_span(self.gripper)
+        for translate, orient, sign, local_x in self.pads:
+            # The pad's centre in the gripper frame, then through the gripper's world transform.
+            local = Gf.Vec3d(local_x, sign * half, 0.0)
+            translate.Set(m.Transform(local))
+            orient.Set(quat)
 
 
 #: Parts whose STL replaces the procedural geometry, and where each one goes.
@@ -286,7 +340,7 @@ class ArmRig:
 ARM_STL_PLACEMENT: dict[str, dict] = {
     "base": dict(frame="root", translate=(0.0, 0.0, 0.0),
                  recenter_xy=True, recenter_z=False, zero_bottom=True, rot_x_deg=0.0),
-    "turret": dict(frame="root", translate=(0.0, 0.0, BRACKET_T + SERVO_BODY[2]),
+    "turret": dict(frame="yaw", translate=(0.0, 0.0, BRACKET_T + SERVO_BODY[2]),
                    recenter_xy=True, recenter_z=False, zero_bottom=True, rot_x_deg=0.0),
     "upper_link": dict(frame="shoulder", translate=("half_upper", 0.0, 0.0),
                        recenter_xy=True, recenter_z=True, zero_bottom=False, rot_x_deg=90.0),
@@ -295,6 +349,117 @@ ARM_STL_PLACEMENT: dict[str, dict] = {
     "gripper_bracket": dict(frame="gripper", translate=(0.0, 0.0, 0.0),
                             recenter_xy=True, recenter_z=True, zero_bottom=False, rot_x_deg=0.0),
 }
+
+
+def build_pad_bodies(stage, spec: ArmSpec, root: str = "/World/gripper_pads") -> tuple:
+    """The two jaw pads as **kinematic rigid bodies**, outside the robot's prim tree.
+
+    This is what makes the grasp a contact grasp rather than a teleport, and the placement is
+    forced by PhysX rather than chosen: a rigid body may not be nested inside another rigid body,
+    and the arm hangs off the chassis, which is an articulation link.  So pads authored under the
+    gripper would be rigid bodies inside a rigid body -- undefined at best.  They live at the top
+    level and their world poses are driven from the gripper frame every control step
+    (``ArmRig.drive_pads``).
+
+    Kinematic, not static: a static collider that is moved by writing its transform does not
+    impart motion to what it touches -- PhysX does not compute a velocity for it, so it tunnels or
+    simply fails to push.  A kinematic body is the correct object for something whose motion is
+    commanded and whose contacts must still be real, and it is also what a position-controlled
+    servo is: infinitely stiff against the load, which is why the box cannot squeeze the jaws open.
+
+    The pads are the only part of the arm with collision.  The links do not have it, and that is
+    still deliberate -- what the grasp needs is the two faces that touch the object.
+
+    **This does not currently work, and it is off by default.**  With the pads present PhysX dies
+    on the first physics step: no traceback, no summary, the process simply ends after
+    "Simulation App Startup Complete" -- the same signature as the fixed-joint attempt recorded in
+    ``GripperAttachment``.  Two things were ruled out first and both were real bugs worth keeping
+    fixed: the pads spawned at the world origin, which is coil 1, so they materialised inside the
+    robot and threw it to (-0.095, 0.109) at -156 degrees (caught by the emergency-stop guard);
+    and pad-versus-robot contact is spurious by construction because the pads *are* the robot, so
+    it is filtered.  Neither cured the crash.  What is left untried is a top-level kinematic body
+    whose pose is written every step while the payload it touches is dynamic -- the payload itself
+    does exactly that and survives, so the difference is worth finding.  Kept behind
+    ``RunConfig.physical_grasp`` so the next attempt starts from working code.
+    """
+    from pxr import UsdPhysics as _UP
+
+    UsdGeom.Xform.Define(stage, Sdf.Path(root))
+    material = add_physics_material(stage, "/World/Looks/PhysicsJaw", 0.95, 0.85)
+    pads = []
+    pad_x = 0.021          # matches the procedural pad's centre in the gripper frame
+    for tag, sign in (("left", +1.0), ("right", -1.0)):
+        body_path = f"{root}/{tag}"
+        body = UsdGeom.Xform.Define(stage, Sdf.Path(body_path))
+        rb = _UP.RigidBodyAPI.Apply(body.GetPrim())
+        rb.CreateKinematicEnabledAttr(True)
+        _UP.MassAPI.Apply(body.GetPrim()).CreateMassAttr(0.004)
+        xf = UsdGeom.Xformable(body)
+        translate = xf.AddTranslateOp()
+        orient = xf.AddOrientOp()
+        orient.Set(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
+        box = add_box(stage, f"{body_path}/pad", (0.014, spec.jaw_pad_thickness, 0.016),
+                      (0.0, 0.0, 0.0), _JAW, collision=True)
+        bind_physics_material(box.GetPrim(), material)
+        pads.append((translate, orient, sign, pad_x))
+    return tuple(pads)
+
+
+def _mount_jaw_pair(stage, path: str, grip_path: str, spec: ArmSpec,
+                    notes: list[str] | None) -> None:
+    """Mount ``gripper.stl`` twice, mirrored, one on each jaw frame.
+
+    An earlier revision refused to mount this file at all, on the stated grounds that one
+    742-triangle mesh "almost certainly holds both fingers" and fingers have to move
+    independently.  That was an inference and it was wrong: a connected-component count over the
+    welded vertices returns **one** component, and the part is not mirror-symmetric in y (1689
+    vertices below its own y centre against 537 above).  So it is a *single* finger, the real
+    gripper uses two copies facing each other, and it can be used.  Measure the file.
+
+    Placement is derived from the mesh, not chosen.  Slicing along x shows a 2 mm-thick blade for
+    the first 46 mm with a tall boss at x = 0, then a flat plate fanning out to 29 mm wide.  The
+    boss is the pivot, so the part is shifted to put that boss on the jaw frame's origin.
+
+    What this cannot do is recover the part's *assembled* orientation.  The six files are laid out
+    on a print bed, not in an assembly -- proven by their thin axes disagreeing: this jaw and the
+    shoulder link are thin in z while the forearm is thin in y.  So the blade is authored along
+    +x, which is a default and not a measurement.  ``notes`` therefore reports where the pad face
+    lands against the modelled tool centre point, because if the real blade is angled in the
+    assembly then 92 mm of jaw along +x is too long -- it would add 92 mm to a documented 240 mm
+    reach -- and that number is the thing to look at.
+    """
+    data = try_read(path)
+    if data is None:
+        return
+    tris = data.triangles
+    lo = tris.reshape(-1, 3).min(axis=0)
+    hi = tris.reshape(-1, 3).max(axis=0)
+    # The pivot boss: the slice within 10 mm of the blade end.
+    near = tris.reshape(-1, 3)
+    near = near[near[:, 0] <= lo[0] + 10.0]
+    piv = (lo[0], 0.5 * (near[:, 1].min() + near[:, 1].max()),
+           0.5 * (near[:, 2].min() + near[:, 2].max()))
+    s = 0.001
+    for tag, mirror in (("jaw_left", False), ("jaw_right", True)):
+        # Mirroring negates y, so the pivot's y offset has to be negated with it.
+        py = -piv[1] if mirror else piv[1]
+        add_stl_mesh(
+            stage, f"{grip_path}/{tag}/jaw_stl", data, scale=s,
+            translate=(-piv[0] * s, -py * s, -piv[2] * s),
+            colour=_JAW, mirror_y=mirror,
+        )
+    if notes is not None:
+        reach = (hi[0] - lo[0]) * s
+        notes.append(
+            f"  jaw: {os.path.basename(path)} -- one connected component, not two, so it is a "
+            f"single finger mounted twice (mirrored).  {data.describe(s)}"
+        )
+        notes.append(
+            f"  !! the jaw is {reach * 1000:.0f} mm from pivot to tip, but the model's tool centre "
+            f"point is {spec.l_tool * 1000:.0f} mm out.  Authored along +x as a default -- the "
+            f"files are a print-bed layout, not an assembly, so the blade's real angle is not "
+            f"recoverable from them.  If it looks wrong, the blade is angled on the real gripper."
+        )
 
 
 def build_arm(
@@ -306,6 +471,7 @@ def build_arm(
     stl_dir: str | None = None,
     notes: list[str] | None = None,
     spec_plate_size: tuple[float, float] | None = None,
+    physical_grasp: bool = False,
 ) -> ArmRig:
     """Author the arm on the custom top plate.
 
@@ -313,26 +479,41 @@ def build_arm(
     on the plate the cameras are mounted in rather than at a guessed height -- the same
     measured chain everything else on this robot hangs off.
     """
+    # Two frames, not one, and the split is the whole point.
+    #
+    # ``root`` is **static**: it carries the mount offset and holds the parts that are bolted to
+    # the robot's plate -- the base and the base servo's body.  ``yaw`` carries the base rotation
+    # and holds everything the servo actually turns.  An earlier version put the rotation on
+    # ``root``, so the base plate and the servo body swung round with the arm; the user saw it
+    # immediately.  A servo cannot rotate its own stator, and a base plate bolted to the deck
+    # cannot rotate at all.
     root = f"{chassis}/arm"
     base = UsdGeom.Xform.Define(stage, Sdf.Path(root))
     xb = UsdGeom.Xformable(base)
     xb.ClearXformOpOrder()
     xb.AddTranslateOp().Set(Gf.Vec3d(spec.mount_offset[0], spec.mount_offset[1], plate_top_local_z))
-    base_rot = xb.AddRotateZOp()
-    base_rot.Set(0.0)
 
-    # --- base: a mounting plate, the base servo standing in it, and the turntable ---------
+    # --- static: the base and the servo bolted into it -------------------------------------
     # The base plate is the part the user excluded from the build ("base large"), so what is
     # modelled is the *small* base: a disc footprint just wide enough for the bolt circle.
     add_cylinder(stage, f"{root}/base_plate", 0.026, BRACKET_T,
                  (0.0, 0.0, 0.5 * BRACKET_T), _LINK, axis="Z")
     _servo(stage, f"{root}/base_servo", (0.0, 0.0, BRACKET_T + 0.5 * SERVO_BODY[2]),
            horn_axis="Z")
+
+    # --- rotating: everything from the turntable up ----------------------------------------
+    yaw_path = f"{root}/yaw"
+    yw = UsdGeom.Xform.Define(stage, Sdf.Path(yaw_path))
+    xy = UsdGeom.Xformable(yw)
+    xy.ClearXformOpOrder()
+    base_rot = xy.AddRotateZOp()
+    base_rot.Set(0.0)
+
     # Turntable: the disc the whole arm rotates on, riding on the base servo's horn.
-    add_cylinder(stage, f"{root}/turret", 0.021, 0.005,
+    add_cylinder(stage, f"{yaw_path}/turret", 0.021, 0.005,
                  (0.0, 0.0, BRACKET_T + SERVO_BODY[2] + 0.006), _METAL, axis="Z")
 
-    shoulder_path = f"{root}/shoulder"
+    shoulder_path = f"{yaw_path}/shoulder"
     sh = UsdGeom.Xform.Define(stage, Sdf.Path(shoulder_path))
     xs = UsdGeom.Xformable(sh)
     xs.ClearXformOpOrder()
@@ -389,6 +570,7 @@ def build_arm(
     # one thing and the scene showed another; anyone reading them would have inferred a 20 mm
     # gap that the mechanism never uses.
     rest_half = 0.5 * spec.gripper_span(spec.gripper_open)
+    _jaw_bodies: list[str] = []
     jaw_l = UsdGeom.Xform.Define(stage, Sdf.Path(f"{grip_path}/jaw_left"))
     jl = UsdGeom.Xformable(jaw_l)
     jl.ClearXformOpOrder()
@@ -419,11 +601,15 @@ def build_arm(
     # than deleted, exactly as the robot's collision boxes are, so nothing that referenced it
     # breaks and the shapes never double up.
     if stl_dir:
-        frames = {"root": root, "shoulder": shoulder_path, "elbow": elbow_path,
-                  "gripper": grip_path}
+        frames = {"root": root, "yaw": yaw_path, "shoulder": shoulder_path,
+                  "elbow": elbow_path, "gripper": grip_path,
+                  "jaw_left": f"{grip_path}/jaw_left", "jaw_right": f"{grip_path}/jaw_right"}
         procedural = {
             "base": (f"{root}/base_plate",),
-            "turret": (f"{root}/turret",),
+            "turret": (f"{yaw_path}/turret",),
+            "jaw": (f"{grip_path}/jaw_left/finger", f"{grip_path}/jaw_left/pad",
+                    f"{grip_path}/jaw_left/pivot", f"{grip_path}/jaw_right/finger",
+                    f"{grip_path}/jaw_right/pad", f"{grip_path}/jaw_right/pivot"),
             "upper_link": (f"{shoulder_path}/upper_link", f"{shoulder_path}/upper_link_far"),
             "fore_link": (f"{elbow_path}/fore_link", f"{elbow_path}/fore_link_far"),
             "gripper_bracket": (f"{grip_path}/bracket",),
@@ -432,6 +618,11 @@ def build_arm(
         if notes is not None:
             notes.extend(stl_notes)
         for part, path in found.items():
+            if part == "jaw":
+                _mount_jaw_pair(stage, path, grip_path, spec, notes)
+                for stand_in in procedural.get("jaw", ()):
+                    _hide(stage, stand_in)
+                continue
             place = ARM_STL_PLACEMENT.get(part)
             if place is None:
                 if notes is not None:
@@ -475,6 +666,8 @@ def build_arm(
     rig = ArmRig(
         spec=spec, root=root, base_rot=base_rot, shoulder_rot=shoulder_rot,
         elbow_rot=elbow_rot, jaw_left=jaw_left, jaw_right=jaw_right, tcp_path=tcp_path,
+        grip_path=grip_path,
+        pads=build_pad_bodies(stage, spec) if physical_grasp else (),
     )
     from ..arm import HOME
 
@@ -553,9 +746,14 @@ class GripperAttachment:
        working feature.  Measure the thing.
     """
 
-    def __init__(self, stage, payload_path: str) -> None:
+    def __init__(self, stage, payload_path: str, *, physical_grasp: bool = True) -> None:
         self.stage = stage
         self.payload_path = payload_path
+        # With a physical grasp the payload is never pose-driven: it stays dynamic and the two
+        # kinematic pads hold it by friction.  ``False`` restores the kinematic carry, kept as a
+        # fallback because a friction grasp can genuinely drop the box and that is a real result
+        # worth being able to compare against rather than a bug to hide.
+        self.physical_grasp = physical_grasp
         self.held = False
         prim = stage.GetPrimAtPath(Sdf.Path(payload_path))
         if not prim or not prim.IsValid():
@@ -662,7 +860,8 @@ class GripperAttachment:
         between.
         """
         self.held = True
-        self._kinematic.Set(True)
+        if not self.physical_grasp:
+            self._kinematic.Set(True)
 
     def release(self) -> None:
         """Hand the payload back to the solver so it falls the last fraction and settles.
@@ -684,6 +883,10 @@ class GripperAttachment:
         backend") and is not needed.
         """
         self.held = False
+        if self.physical_grasp:
+            # Nothing to hand back -- it was dynamic the whole time.  Opening the jaws is the
+            # release, and gravity does the rest.
+            return
         self._kinematic.Set(False)
         try:
             view = self._rigid_view()
@@ -694,7 +897,12 @@ class GripperAttachment:
             print(f"  [arm] note: could not zero the payload velocity ({exc})", flush=True)
 
     def follow(self, rig: ArmRig) -> None:
-        """Drive the payload to the tool centre point.  Only while held.
+        """Drive the payload to the tool centre point -- only in the non-physical fallback.
+
+        With ``physical_grasp`` set, this does nothing at all: the payload is a dynamic body and
+        the two kinematic pads carry it by contact and friction, which is the whole point.
+        Writing its pose on top of that would be exactly the "보여주기 식" the user objected to,
+        and worse than before, because it would silently override a real result.
 
         The payload takes the tool's **position and yaw only** -- it stays level.  That is not
         a simplification, it is what the mechanism does.  The shoulder and elbow rotate about
@@ -712,7 +920,7 @@ class GripperAttachment:
         correct without this function having to know how the arm is mounted or which way the
         chassis is pointing.
         """
-        if not self.held:
+        if self.physical_grasp or not self.held:
             return
         mat = rig.tcp_world(self.stage)
         self._translate.Set(mat.ExtractTranslation())
