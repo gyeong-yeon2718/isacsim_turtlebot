@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($k = 'HKCU:\\\\Control Panel\\\\Keyboard'; $v = \\(Get-ItemProperty -Path $k -Name PrintScreenKeyForSnippingEnabled -ErrorAction SilentlyContinue\\).PrintScreenKeyForSnippingEnabled; if \\($null -eq $v\\) { \"PrintScreenKeyForSnippingEnabled: \\(미설정\\)\" } else { \"PrintScreenKeyForSnippingEnabled: $v\" }; $pkg = Get-AppxPackage Microsoft.ScreenSketch -ErrorAction SilentlyContinue; if \\($pkg\\) { \"SnippingTool: $\\($pkg.Version\\) / Status=$\\($pkg.Status\\) / $\\($pkg.InstallLocation\\)\" } else { \"SnippingTool: 설치 안 됨\" })"
+    ]
+  }
+}

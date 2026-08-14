@@ -82,12 +82,26 @@ BRACKET_T = 0.0025                       # m, printed wall thickness
 
 #: Rotation about X that brings ``gripper.stl`` from its print pose to its assembled pose.
 #:
-#: **Negative**, and the sign is the whole point.  Both +90 and -90 put the 8.20 mm horn bore
-#: vertical, so the bore alone cannot choose between them -- and the first attempt chose wrong.  The
-#: user reported the jaw upside down and asked for top and bottom swapped, which is this: the servo
-#: is mounted on top of the forearm bar and the jaw hangs *under* its horn, so the jaw body has to
-#: end up below the pivot rather than above it.
-JAW_ROT_X_DEG = -90.0
+#: **Zero**, on the user's direct instruction: "가장 평평한 부분이 하늘을 보게 하자" -- the flattest
+#: face points at the sky.  That face is the 92 x 29 mm plate at the jaw's far end, whose normal is
+#: the part's own Z, so it points up at zero rotation and nowhere useful at +-90.
+#:
+#: This settles something I could not settle by measuring, and it is worth being straight about why.
+#: The part has *two* flat regions with different normals -- the 2 mm blade around the bores (normal
+#: Y) and the plate at the tip (normal Z) -- so "the flat part" and "the bore's axis" pull in
+#: different directions, and no amount of staring at the mesh chooses between them.  Three
+#: revisions guessed: +90, then -90, now this.  The person who assembled it is the authority.
+#:
+#: The rotation axis follows from it rather than being a separate choice: at zero rotation the
+#: 8.20 mm horn bore lies along **Y**, so the finger pitches about Y.  See ``JAW_AXIS``.
+JAW_ROT_X_DEG = 0.0
+
+#: Which axis the moving finger turns about, given ``JAW_ROT_X_DEG``.
+#:
+#: This is why the gripper's opening was invisible.  The bore is along Y in the assembled pose, but
+#: the code drove a ``RotateZ`` -- so the finger turned about an axis the mechanism does not have,
+#: and the motion read as nothing happening.  The axis has to be the one the hole is on.
+JAW_AXIS = "Y"
 
 #: The gripper servo's position along ``gripper_upper_arm.stl``, in metres from that part's near
 #: end.  MEASURED: the part has two Z-axis bores at x = 69.50 and x = 97.97, spaced 28.47 mm, which
@@ -487,8 +501,10 @@ def _mount_jaw_pair(stage, path: str, grip_path: str, spec: ArmSpec,
     # goes: the servo is mounted on top of the forearm bar and the jaw hangs under the horn.
     if JAW_ROT_X_DEG < 0:
         piv = (piv_raw[0], piv_raw[2], -piv_raw[1])
-    else:
+    elif JAW_ROT_X_DEG > 0:
         piv = (piv_raw[0], -piv_raw[2], piv_raw[1])
+    else:
+        piv = piv_raw
     # **Rotate the pivot with the mesh.**  ``add_stl_mesh`` turns the triangles by ``rot_x_deg``
     # first and only then applies ``translate``, so a pivot measured in the file's own frame is in
     # the wrong frame by the time it is used.  Under +90 degrees about X, (x, y, z) -> (x, -z, y).
@@ -598,8 +614,13 @@ def build_arm(
     elbow_rot = xe.AddRotateYOp()
     elbow_rot.Set(0.0)
 
-    # --- elbow: servo sandwiched between the upper arm's cheeks, driving the forearm -------
-    _servo(stage, f"{elbow_path}/servo", (0.006, -0.008, 0.0),
+    # --- elbow: the servo sits ON TOP of the lower arm and its horn carries the upper arm ---
+    # The user's description of the real joint: "서보모터가 로어암의 윗부분에 달리고 그 서보 돌아가는
+    # 부분이 어퍼암에 연결되는 구조".  So the servo's *body* belongs to the lower arm and is drawn on
+    # its upper surface, not floating at the joint centre where the previous version put it -- which
+    # is why the elbow looked like two links meeting at nothing.  The horn axis is the joint axis,
+    # so the body sits below it by half its own height.
+    _servo(stage, f"{elbow_path}/servo", (-0.004, 0.0, -0.5 * SERVO_BODY[2] - 0.003),
            horn_axis="Y", horn_offset=0.5 * SERVO_BODY[1] + 0.003)
     _link_plate(stage, f"{elbow_path}/fore_link", length=spec.l_fore, height=0.018,
                 thickness=0.004, centre=(0.5 * spec.l_fore, 0.008, 0.0))
@@ -631,7 +652,7 @@ def build_arm(
     xm = UsdGeom.Xformable(mv)
     xm.ClearXformOpOrder()
     xm.AddTranslateOp().Set(Gf.Vec3d(spec.jaw_pivot_x, 0.0, 0.006))
-    jaw_left = xm.AddRotateZOp()
+    jaw_left = xm.AddRotateYOp() if JAW_AXIS == "Y" else xm.AddRotateZOp()
     jaw_left.Set(0.0)
     _jaw(stage, f"{grip_path}/jaw_left", spec, +1.0)
 
@@ -642,7 +663,7 @@ def build_arm(
     xfx = UsdGeom.Xformable(fx)
     xfx.ClearXformOpOrder()
     xfx.AddTranslateOp().Set(Gf.Vec3d(spec.jaw_pivot_x, 0.0, -0.004))
-    jaw_right = xfx.AddRotateZOp()
+    jaw_right = xfx.AddRotateYOp() if JAW_AXIS == "Y" else xfx.AddRotateZOp()
     jaw_right.Set(0.0)
     _jaw(stage, f"{grip_path}/jaw_fixed", spec, -1.0)
 
