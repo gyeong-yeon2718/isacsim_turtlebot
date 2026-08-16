@@ -125,18 +125,16 @@ SERVO_POCKET_X = 0.0837
 #: substring alone would hand the wrist bracket to the forearm.  So the primary match is on the
 #: exact stem, and the wrist is resolved before the forearm regardless.
 ARM_STL_STEMS: dict[str, tuple[str, ...]] = {
-    # ``base_slim`` is deliberately NOT loaded, and the reason is a measurement rather than taste.
-    # It is 150 x 150 mm; the printed top plate it would bolt to is 92 x 230 mm.  So it overhangs
-    # the plate by 29 mm on each side and sits right at plate level -- which is the *only* arm part
-    # anywhere near the deck.  Everything else in the chain clears it by 125-175 mm, measured at
-    # HOME, at CARRY, and along the interpolation between them.  So when the arm appears to pass
-    # through the plate by the camera modules, this is the part doing it, and it is doing it
-    # because it does not fit.
+    # ``base_slim`` is loaded whole -- **the wings are real and must not be trimmed.**  The user
+    # confirmed it: the part is 150 x 150 mm on a 92 x 230 mm plate and the 29 mm of overhang per
+    # side is the mounting wings, which are on the built robot.
     #
-    # Either it is not the part on the real robot, or its mounting wings were cut off during the
-    # build.  Until that is known, the small procedural base is drawn instead: it fits, it sits on
-    # the plate rather than through it, and it does not cover the camera holes.  Putting the file
-    # back is one line once the question is answered.
+    # Recorded because I got this wrong once and dropped the part: the overhang is a fact about the
+    # hardware, not a modelling error, so the build note that reports it is an observation and not
+    # a defect.  It also means the base legitimately extends past the plate into open air beside
+    # it, which is *not* the same thing as passing through the deck -- the arm crossing the plate's
+    # left edge has a different cause, written up at ``warehouse.STATION_SURFACE_Z``.
+    "base": ("base_slim",),
     "turret": ("base_rotation",),              # turntable on the base servo's horn
     "upper_link": ("lower_arm",),              # shoulder -> elbow, 120 mm  (NOT "upper_arm")
     # The forearm and the gripper's fixed half are ONE part.  The user was explicit: those two
@@ -834,11 +832,10 @@ def build_arm(
                     plate = spec_plate_size
                     if plate and (ext[0] > plate[0] or ext[1] > plate[1]):
                         notes.append(
-                            f"  !! base STL is {ext[0] * 1000:.0f} x {ext[1] * 1000:.0f} mm but the "
-                            f"printed plate is {plate[0] * 1000:.0f} x {plate[1] * 1000:.0f} mm -- "
-                            f"it overhangs.  Either the arm is not bolted to this plate on the real "
-                            f"robot, or base_slim carries mounting wings that are trimmed in the "
-                            f"build.  Reported rather than hidden or silently scaled."
+                            f"  base STL {ext[0] * 1000:.0f} x {ext[1] * 1000:.0f} mm overhangs the "
+                            f"{plate[0] * 1000:.0f} x {plate[1] * 1000:.0f} mm plate by "
+                            f"{0.5 * (ext[0] - plate[0]) * 1000:.0f} mm a side -- expected: those "
+                            f"are the mounting wings, confirmed on the built robot"
                         )
 
     rig = ArmRig(
