@@ -56,24 +56,28 @@ _ROLLER = (0.78, 0.78, 0.80)
 # arm was genuinely occupying the same space, because the object was below the deck it had to
 # reach over.
 #
-# Raising it to 178 mm was tried and REVERTED, and the attempt is recorded because the diagnosis
-# behind it is right even though the change was not enough.  At 178 the whole approach does stay
-# above the deck -- the placement search re-solved to 100 % manipulability at both stations and the
-# arm no longer crosses the plate edge -- but the payload then fell off the conveyor and landed on
-# the floor at 90 degrees, because a 25 mm box on a 38 mm-wide rail has only 6.5 mm of margin a
-# side and raising the surface changed how it is set down onto it.  Fixing the height therefore
-# also means widening the conveyor and re-seating the payload on it, which is a bigger change than
-# it looks and wants a run to check rather than a guess.
+# **Above the robot's own top plate (165.3 mm), and that is the whole point.**
 #
-# So this stays at 100 mm, the arm still crosses the plate's left edge while reaching down for the
-# object, and that is a known unresolved defect rather than a thing I believe is fine.
-STATION_SURFACE_Z = 0.100        # m above the plywood
+# At the old 100 mm the payload sat 40 mm BELOW the deck the arm is bolted to, so picking it meant
+# reaching down past the plate's edge -- and the forearm crossed that edge on the way, which is the
+# arm going through the deck by the left camera module.  No collision setting can fix that: the arm
+# and the plate genuinely want the same space when the target is under the deck.
+#
+# 178 mm puts the payload's centre at 190.5 mm, 25 mm clear of the plate, so the approach, grasp
+# and lift all happen above it.  A first attempt at this was reverted because the payload then fell
+# off the conveyor: a 25 mm box on a 38 mm rail has 6.5 mm of margin a side.  ``CONVEYOR_WIDTH``
+# went to 60 mm with it, which is the other half of the same change -- neither works alone.
+STATION_SURFACE_Z = 0.178        # m above the plywood
 STATION_FOOTPRINT = (0.070, 0.090)   # m, the drop table's top
 # The conveyor is deliberately short and narrow.  Its footprint is a hard constraint in the
 # placement search -- a line running the whole depth of the board cannot clear the robot's
 # turning circle at both the dock and the route corner, and the first version that tried it put
 # the rear extension plate through the rails.
-CONVEYOR_WIDTH = 0.038               # m, outside the rails
+# 60 mm outside the rails, giving a 44 mm inner run for the 25 mm box: 9.5 mm of margin a side
+# rather than 6.5.  Raised with ``STATION_SURFACE_Z``; at 38 mm the box fell off the moment the
+# surface moved.  It is still narrow enough to clear the robot's turning circle -- the placement
+# search checks that from this constant, so it cannot silently stop being true.
+CONVEYOR_WIDTH = 0.060               # m, outside the rails
 CONVEYOR_LENGTH = 0.200              # m, along y
 # Height of the plywood above the warehouse floor.  A station the placement search puts outside
 # the board has to stand on the floor, so its legs are this much longer.
