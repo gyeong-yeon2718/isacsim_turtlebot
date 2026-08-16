@@ -62,12 +62,28 @@ class ArmSpec:
     # ``l_fore`` is what remains for elbow -> servo horn once the measured jaw is accounted for, so
     # the split is derived and only this one number is a choice.  It wants one measurement from the
     # hardware -- elbow pivot to the jaw tips with the gripper shut -- and then it is exact.
-    elbow_to_tool: float = 0.112     # m, < 120 mm.  USER-CONSTRAINED, awaiting one measurement
+    # MEASURED, and now the primary rather than the derived one.  ``gripper_upper_arm.stl`` mounts
+    # with its near end at the elbow, and its two Z-axis flange bores at x = 69.50 and 97.97 put
+    # the SG90's body centre at 83.7 mm; the output shaft sits about 5.9 mm inboard of that.
+    #
+    # This inverts the previous arrangement, in which ``elbow_to_tool`` was assumed and ``l_fore``
+    # fell out of it.  That gave 41.9 mm, which drew the forearm mostly *behind* the elbow and
+    # made the arm look far too short for what it could reach -- the user's report.  Taking the
+    # measurement as primary and letting the total follow is the right way round: the part is a
+    # fact and the total is its consequence.
+    l_fore: float = 0.0778           # m, elbow -> gripper servo horn axis
 
     @property
-    def l_fore(self) -> float:
-        """Elbow -> gripper servo horn.  Whatever is left after the jaw's own reach."""
-        return self.elbow_to_tool - self.jaw_tip_reach
+    def elbow_to_tool(self) -> float:
+        """Elbow -> the point the gripper applies force.  Derived from the two measured parts.
+
+        NOTE this comes to about 148 mm, which exceeds the "under 120 mm" the user gave earlier.
+        The two cannot both be right, and the conflict is left visible rather than split the
+        difference: the 120 mm came from reading the documented ``LENGTH_ELBOW_GRIPPER``, while
+        this comes from the flange bores in one part and the horn bore in the other, which agree
+        with each other.  One measurement settles it -- elbow pivot to the shut jaw tips.
+        """
+        return self.l_fore + self.l_tool
     reach_min: float = 0.030         # m, MEASURED (documented usable minimum)
     reach_max: float = 0.230         # m, MEASURED (documented usable maximum)
 

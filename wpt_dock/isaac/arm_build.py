@@ -406,8 +406,11 @@ ARM_STL_PLACEMENT: dict[str, dict] = {
     # Giving the forearm the jaw's 90 degrees -- on the assumption that parts of one assembly share
     # an orientation -- turned its wide face to the sky.  The user asked for it back by 90 degrees
     # counter-clockwise, which is this: zero.
-    "fore_link": dict(frame="elbow", translate=("half_fore", 0.0, 0.0),
-                      recenter_xy=True, recenter_z=True, zero_bottom=False, rot_x_deg=0.0),
+    # ``near_end`` puts the part's own min-x at the elbow, rather than centring it there.  Centred,
+    # half of a 149 mm forearm hung *behind* the joint and the arm looked far too short for its
+    # reach -- which is what the user reported.  A link starts at its joint.
+    "fore_link": dict(frame="elbow", translate=("near_end", 0.0, 0.0),
+                      recenter_xy=False, recenter_z=True, zero_bottom=False, rot_x_deg=0.0),
 }
 
 
@@ -503,8 +506,13 @@ def _mount_jaw_pair(stage, path: str, grip_path: str, spec: ArmSpec,
     # earlier revision put the 11.47 into **y** and the thickness centre into z, which is a
     # component swap and left the mesh hanging off its own pivot.  Along Y the bore is a through
     # hole, so the pivot's y is simply the middle of the thickness.
+    # The bore's y is the centre of the **blade it is drilled through**, not the centre of the
+    # whole part.  The part is 29 mm wide overall, but at the bore's x the material is only the
+    # 2 mm blade spanning y = 2.0..4.0 from the min corner.  Taking the part's half-width put the
+    # pivot 11.5 mm off to one side, and the jaw hung out there -- the user saw it "flying around
+    # on the left of the arm", and 11.5 mm is exactly that offset.  Measured from the slice.
     piv_raw = (lo[0] + 22.04,
-               0.5 * (lo[1] + hi[1]),
+               lo[1] + 3.0,
                lo[2] + 11.47)
     # Under -90 about X, (x, y, z) -> (x, z, -y); under +90 it is (x, -z, y).  Both put the 8.20 mm
     # horn bore vertical, which is why picking the wrong one is easy and why the user saw the jaw
@@ -734,14 +742,21 @@ def build_arm(
             # Symbolic offsets, resolved from the spec so the mesh lands on its segment midpoint
             # rather than on a number typed in here.
             tx = place["translate"][0]
+            ty = place["translate"][1]
             if tx == "half_upper":
                 tx = 0.5 * spec.l_upper
             elif tx == "half_fore":
                 tx = 0.5 * spec.l_fore
+            elif tx == "near_end":
+                # Put the part's own near end on the joint.  Its y is centred at the same time,
+                # because a link that starts at its joint should also straddle it.
+                _lo, _hi = data.bounds
+                tx = -float(_lo[0]) * 0.001
+                ty = -0.5 * float(_lo[1] + _hi[1]) * 0.001
             mesh_path = f"{frames[place['frame']]}/{part}_stl"
             add_stl_mesh(
                 stage, mesh_path, data, scale=0.001,
-                translate=(tx, place["translate"][1], place["translate"][2]),
+                translate=(tx, ty, place["translate"][2]),
                 colour=_LINK, recenter_xy=place["recenter_xy"],
                 recenter_z=place["recenter_z"], zero_bottom=place["zero_bottom"],
                 rot_x_deg=place["rot_x_deg"],

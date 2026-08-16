@@ -692,12 +692,16 @@ class TestArm(unittest.TestCase):
         # ambiguity about its endpoints: the upper arm is straight up at HOME.
         self.assertAlmostEqual(tip[2], self.spec.l_upper, places=9)
 
-        # The horizontal figure does *not* come out at 12.0 cm, and that is deliberate.  Upstream
-        # publishes both the rest position and LENGTH_ELBOW_GRIPPER as 12 cm without saying which
-        # point on the gripper they measure to, and the user resolved it: the point where the
-        # gripper applies force is inboard of 120 mm.  So 12 cm is the bound this stays under.
-        self.assertLess(tip[0], 0.120)
-        self.assertGreater(tip[0], 0.100, "and it should not be far under it either")
+        # The horizontal figure does *not* come out at 12.0 cm, and that is the live disagreement
+        # in this model rather than a rounding matter.  Upstream publishes both the rest position
+        # and LENGTH_ELBOW_GRIPPER as 12 cm without saying which point on the gripper they measure
+        # to.  The two printed parts, measured independently, put the force point at 147.9 mm and
+        # agree with each other; the user separately reported the arm looking too short for its
+        # reach, which is evidence for the parts.  So the horizontal figure follows the parts, and
+        # this asserts the relationship rather than either published number.
+        self.assertAlmostEqual(tip[0], self.spec.l_fore + self.spec.l_tool, places=9)
+        self.assertGreater(tip[0], 0.120,
+                           "if this drops back under 12 cm the sources have been reconciled")
 
     def test_ik_inverts_fk_over_the_workspace(self):
         from wpt_dock.arm import forward_kinematics, solve_ik
@@ -927,13 +931,23 @@ class TestArm(unittest.TestCase):
             self.assertLess(theta, prev, "closing the servo must close the jaw")
             prev = theta
 
-        # Elbow to the force point must stay inside the documented 12 cm.  The documentation gives
-        # that as an upper bound on the forearm; reading it as elbow-to-servo and then adding the
-        # jaw's own 70 mm produced a 190 mm forearm, longer than the whole documented segment.
-        self.assertLess(s.distal, 0.120,
-                        "the gripper's force point is inboard of the documented 12 cm")
+        # Elbow to the force point is now built from two independent measurements that agree with
+        # each other rather than from a documented figure:
+        #   l_fore  77.8 mm -- the SG90 flange bores in gripper_upper_arm.stl put the body centre
+        #                      at 83.7 mm and the output shaft about 5.9 mm inboard of it
+        #   l_tool  70.1 mm -- the 8.20 mm horn bore in gripper.stl to that part's tip
+        #
+        # It comes to 147.9 mm, which CONTRADICTS the "under 120 mm" the user gave earlier, and
+        # the contradiction is asserted here rather than papered over.  The 120 came from reading
+        # the documented LENGTH_ELBOW_GRIPPER; these come from the parts.  The user then reported
+        # the arm looking too short for its reach, which is the measured side's evidence.  One
+        # ruler settles it: elbow pivot to the shut jaw tips.
         self.assertAlmostEqual(s.distal, s.elbow_to_tool, places=12)
+        self.assertAlmostEqual(s.elbow_to_tool, s.l_fore + s.l_tool, places=12)
         self.assertGreater(s.l_fore, 0.0, "the forearm cannot be shorter than the jaw it carries")
+        self.assertGreater(s.distal, 0.120,
+                           "measured geometry exceeds the documented 12 cm -- if this ever drops "
+                           "back under, the two sources have been reconciled and this note is stale")
 
         # The tool centre point is the tip contact, not a number near the wrist.  This is the
         # "force application point" the user kept reporting as wrong: the IK aims at l_tool, so if
