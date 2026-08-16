@@ -907,6 +907,15 @@ class TestArm(unittest.TestCase):
                            "closing to the mechanical stop means the jaws pass through the box")
         self.assertLess(angle, self.spec.gripper_open, "the jaws have to actually move")
 
+        # The object is cradled between the fingers, not pinched at their very ends: its centre
+        # sits grip_depth inboard of the tips, and that has to clear the payload's own half-width
+        # or the cube hangs out past the gripper -- which is what the user saw.
+        self.assertGreater(self.spec.grip_depth, PAYLOAD_SIZE / 2,
+                           "the tips must reach past the object's centre, not stop at it")
+        self.assertAlmostEqual(self.spec.l_tool,
+                               self.spec.jaw_pivot_x + self.spec.jaw_tip_reach
+                               - self.spec.grip_depth, places=12)
+
         # And an ungrippable object must be refused rather than mimed.
         with self.assertRaises(ValueError):
             self.spec.grip_angle_for(open_gap + 0.001)
@@ -956,7 +965,8 @@ class TestArm(unittest.TestCase):
         # The tool centre point is the tip contact, not a number near the wrist.  This is the
         # "force application point" the user kept reporting as wrong: the IK aims at l_tool, so if
         # it does not sit where the jaws actually meet, every grasp is off by the difference.
-        self.assertAlmostEqual(s.l_tool, s.jaw_pivot_x + s.jaw_tip_reach, places=12)
+        self.assertAlmostEqual(s.l_tool,
+                               s.jaw_pivot_x + s.jaw_tip_reach - s.grip_depth, places=12)
         self.assertGreater(s.l_tool, 0.050,
                            "a tool point near the wrist cannot be where this gripper holds things")
 

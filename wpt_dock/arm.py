@@ -81,8 +81,12 @@ class ArmSpec:
 
     @property
     def l_fore(self) -> float:
-        """Elbow -> gripper servo horn.  What the measured total leaves after the jaw's reach."""
-        return self.ELBOW_TO_TOOL - self.jaw_tip_reach
+        """Elbow -> gripper servo horn.  What the measured total leaves after the tool offset.
+
+        Keyed to ``l_tool`` rather than to ``jaw_tip_reach`` so the user's measured 120 mm from the
+        elbow to where the gripper holds things stays exact when the grip depth changes.
+        """
+        return self.ELBOW_TO_TOOL - self.l_tool
 
     @property
     def elbow_to_tool(self) -> float:
@@ -115,8 +119,8 @@ class ArmSpec:
     # moves every grasp and every placement by the difference.
     @property
     def l_tool(self) -> float:
-        """Gripper mount -> tool centre point: the tip contact, where the jaws meet."""
-        return self.jaw_pivot_x + self.jaw_tip_reach
+        """Gripper mount -> tool centre point, which sits ``grip_depth`` inboard of the tips."""
+        return self.jaw_pivot_x + self.jaw_tip_reach - self.grip_depth
 
     # ESTIMATED: neither repository documents the height from the mounting surface to the
     # shoulder pivot.  0.055 m is a typical SG90 base-rotation bracket plus shoulder
@@ -217,6 +221,18 @@ class ArmSpec:
     # and the jaw pivots at that frame's origin.
     jaw_pivot_x: float = 0.0          # m, gripper frame -> horn axis: they coincide
     jaw_tip_reach: float = 0.0701     # m, horn axis -> tip.  92.16 - 22.04 from the mesh
+
+    # How far INBOARD of the tips the held object's centre sits.
+    #
+    # Without this the object's centre was at the tip contact, so half of it hung out past the end
+    # of the gripper -- the user's "큐브가 살짝 튀어나오는 느낌".  A pincer does not pinch an object
+    # at the very ends of its fingers; the fingers reach past the object so it is cradled between
+    # them.  Half the payload plus 2 mm puts the whole cube inside the jaws with the tips just
+    # beyond it, which is how you would actually pick something up with these.
+    # = PAYLOAD_HALF (12.5) + 2 mm.  Spelled out rather than referenced because ``PAYLOAD_SIZE``
+    # is defined below this class; ``test_the_payload_fits_between_the_jaws`` ties the two together
+    # so they cannot drift apart silently.
+    grip_depth: float = 0.0145        # m
 
     def jaw_rotation(self, opening: float) -> float:
         """Angle the **single** moving jaw is swung open, for a servo angle.  Zero is shut.
