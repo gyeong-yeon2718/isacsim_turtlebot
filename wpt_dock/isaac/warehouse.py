@@ -47,7 +47,27 @@ _PAYLOAD = (0.85, 0.30, 0.18)
 _TARGET = (0.95, 0.80, 0.10)
 _ROLLER = (0.78, 0.78, 0.80)
 
-STATION_SURFACE_Z = 0.100        # m above the plywood; mid-workspace for the arm
+# Station surface height above the plywood.
+#
+# **Above the robot's own top plate, and that is the point.**  At the old 100 mm the payload sat
+# 40 mm BELOW the plate's upper surface (165.3 mm), so picking it meant reaching down past the
+# plate's edge -- and the forearm crossed that edge on the way, which is the arm going through the
+# deck by the left camera module that the user kept seeing.  No collision setting fixes that; the
+# arm was genuinely occupying the same space, because the object was below the deck it had to
+# reach over.
+#
+# Raising it to 178 mm was tried and REVERTED, and the attempt is recorded because the diagnosis
+# behind it is right even though the change was not enough.  At 178 the whole approach does stay
+# above the deck -- the placement search re-solved to 100 % manipulability at both stations and the
+# arm no longer crosses the plate edge -- but the payload then fell off the conveyor and landed on
+# the floor at 90 degrees, because a 25 mm box on a 38 mm-wide rail has only 6.5 mm of margin a
+# side and raising the surface changed how it is set down onto it.  Fixing the height therefore
+# also means widening the conveyor and re-seating the payload on it, which is a bigger change than
+# it looks and wants a run to check rather than a guess.
+#
+# So this stays at 100 mm, the arm still crosses the plate's left edge while reaching down for the
+# object, and that is a known unresolved defect rather than a thing I believe is fine.
+STATION_SURFACE_Z = 0.100        # m above the plywood
 STATION_FOOTPRINT = (0.070, 0.090)   # m, the drop table's top
 # The conveyor is deliberately short and narrow.  Its footprint is a hard constraint in the
 # placement search -- a line running the whole depth of the board cannot clear the robot's

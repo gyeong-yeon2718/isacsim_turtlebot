@@ -125,7 +125,18 @@ SERVO_POCKET_X = 0.0837
 #: substring alone would hand the wrist bracket to the forearm.  So the primary match is on the
 #: exact stem, and the wrist is resolved before the forearm regardless.
 ARM_STL_STEMS: dict[str, tuple[str, ...]] = {
-    "base": ("base_slim",),                    # the pedestal housing the base servo
+    # ``base_slim`` is deliberately NOT loaded, and the reason is a measurement rather than taste.
+    # It is 150 x 150 mm; the printed top plate it would bolt to is 92 x 230 mm.  So it overhangs
+    # the plate by 29 mm on each side and sits right at plate level -- which is the *only* arm part
+    # anywhere near the deck.  Everything else in the chain clears it by 125-175 mm, measured at
+    # HOME, at CARRY, and along the interpolation between them.  So when the arm appears to pass
+    # through the plate by the camera modules, this is the part doing it, and it is doing it
+    # because it does not fit.
+    #
+    # Either it is not the part on the real robot, or its mounting wings were cut off during the
+    # build.  Until that is known, the small procedural base is drawn instead: it fits, it sits on
+    # the plate rather than through it, and it does not cover the camera holes.  Putting the file
+    # back is one line once the question is answered.
     "turret": ("base_rotation",),              # turntable on the base servo's horn
     "upper_link": ("lower_arm",),              # shoulder -> elbow, 120 mm  (NOT "upper_arm")
     # The forearm and the gripper's fixed half are ONE part.  The user was explicit: those two
