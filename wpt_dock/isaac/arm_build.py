@@ -236,14 +236,18 @@ def _jaw(stage, path: str, spec: ArmSpec, sign: float = 1.0) -> None:
     the kinematics together.
     """
     r = spec.jaw_tip_reach
-    # The vertical pivot -- the servo horn on the moving jaw, a screw on the fixed one.
-    add_cylinder(stage, f"{path}/hub", 0.0048, 0.005, (0.0, 0.0, 0.0), _METAL, axis="Z")
-    # A flat arm running out to the tip, thin in z, as the printed part is.
-    add_box(stage, f"{path}/arm", (r, 0.018, 0.004), (0.5 * r, 0.0, 0.0), _JAW)
-    # The hooked tip.  Both jaws' tips sit on the centreline so that at zero swing they meet --
-    # that is the structure the user described and photographed, and it is what puts the tool
-    # centre point at the tip rather than near the wrist.
-    add_box(stage, f"{path}/tip", (0.012, 0.010, 0.016), (r, 0.0, sign * 0.008), _JAW)
+    # The pivot -- the servo horn on the moving jaw, a screw on the fixed one.  Drawn on the axis
+    # the finger actually turns about, so it reads as a hinge rather than a stray disc.
+    add_cylinder(stage, f"{path}/hub", 0.0048, 0.006, (0.0, 0.0, 0.0), _METAL, axis=JAW_AXIS)
+
+    # No ``arm`` box.  The user asked for it gone -- with the real mesh loaded it is a second
+    # lever lying alongside the printed one, and without the mesh the hub and tip already show
+    # where the finger is.  A stand-in that duplicates a part is worse than no stand-in.
+
+    # The gripping tip.  Both fingers' tips sit on the centreline so that at zero swing they
+    # meet: that is what makes it a pincer, and it is what puts the tool centre point where the
+    # jaws close rather than out in mid-air.
+    add_box(stage, f"{path}/tip", (0.012, 0.012, 0.014), (r, 0.0, sign * 0.007), _JAW)
     # No collider on the face, and the reason is structural rather than a scope choice.  It hangs
     # off the arm, which hangs off the chassis -- an articulation link, i.e. a rigid body.  A
     # collider on that link whose *local* transform is rewritten every frame (the jaw separation
@@ -494,7 +498,14 @@ def _mount_jaw_pair(stage, path: str, grip_path: str, spec: ArmSpec,
     # SG90 horn's spline boss and the small one is a horn screw.  Measured positions, from the
     # mesh: 1.80 mm at x = 8.08, 8.20 mm at x = 22.04, both on the same face at z = 11.5.
     # Using the small hole put the pivot 14 mm too far back and the tool point with it.
-    piv_raw = (lo[0] + 22.04, lo[1] + 11.47, lo[2] + 0.5 * (hi[2] - lo[2]))
+    # The 8.20 mm bore, from the mesh: it lies along the part's Y at x = 22.04 and z = 11.47,
+    # both measured from the part's min corner.  Those two numbers are an (x, z) pair -- an
+    # earlier revision put the 11.47 into **y** and the thickness centre into z, which is a
+    # component swap and left the mesh hanging off its own pivot.  Along Y the bore is a through
+    # hole, so the pivot's y is simply the middle of the thickness.
+    piv_raw = (lo[0] + 22.04,
+               0.5 * (lo[1] + hi[1]),
+               lo[2] + 11.47)
     # Under -90 about X, (x, y, z) -> (x, z, -y); under +90 it is (x, -z, y).  Both put the 8.20 mm
     # horn bore vertical, which is why picking the wrong one is easy and why the user saw the jaw
     # upside down.  -90 is the one that hangs the jaw body *below* its pivot, which is where it
@@ -693,8 +704,7 @@ def build_arm(
             # renaming the procedural pieces cannot silently leave them on screen again -- which is
             # exactly what happened when these were listed as finger/pad/pivot and the pieces had
             # become hub/arm/tip.
-            "jaw": (f"{grip_path}/jaw_left/hub", f"{grip_path}/jaw_left/arm",
-                    f"{grip_path}/jaw_left/tip"),
+            "jaw": (f"{grip_path}/jaw_left/hub", f"{grip_path}/jaw_left/tip"),
             "upper_link": (f"{shoulder_path}/upper_link", f"{shoulder_path}/upper_link_far"),
             # ``jaw_fixed`` is deliberately NOT hidden.  It is the surface the payload is held
             # against, and hiding it on the assumption that the STL provides a hook at the same
