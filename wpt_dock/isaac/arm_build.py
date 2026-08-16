@@ -350,8 +350,18 @@ class ArmRig:
         m = cache.GetLocalToWorldTransform(stage.GetPrimAtPath(Sdf.Path(self.grip_path)))
         rot = m.ExtractRotationQuat()
         quat = Gf.Quatf(float(rot.GetReal()), *[float(v) for v in rot.GetImaginary()])
+        # The finger body follows the jaw frame, which *rotates*; the pads follow the gripper frame
+        # and are offset by the opening.  Two different parents, so two different transforms.
+        jm = cache.GetLocalToWorldTransform(
+            stage.GetPrimAtPath(Sdf.Path(f"{self.grip_path}/jaw_left")))
+        jrot = jm.ExtractRotationQuat()
+        jquat = Gf.Quatf(float(jrot.GetReal()), *[float(v) for v in jrot.GetImaginary()])
         half = 0.5 * self.spec.gripper_span(self.gripper)
         for translate, orient, sign, local_x in self.pads:
+            if sign == 0.0:                       # the finger slab, on the swinging jaw frame
+                translate.Set(jm.Transform(Gf.Vec3d(local_x, 0.0, 0.0)))
+                orient.Set(jquat)
+                continue
             # The pad's centre in the gripper frame, then through the gripper's world transform.
             local = Gf.Vec3d(local_x, sign * half, 0.0)
             translate.Set(m.Transform(local))
@@ -474,6 +484,32 @@ def build_pad_bodies(stage, spec: ArmSpec, root: str = "/World/gripper_pads") ->
                       (0.0, 0.0, 0.0), _JAW, collision=True)
         bind_physics_material(box.GetPrim(), material)
         pads.append((translate, orient, sign, pad_x))
+
+    # The moving finger's own body, as a collider.
+    #
+    # Without this the pads grip correctly but the *visible* jaw sweeps straight through the box:
+    # the arm links carry no collision, so the mesh and the payload occupy the same space while
+    # two small invisible pads do the holding.  That is what the user was seeing -- the arm
+    # passing through the object.  A finger that can hold something must also be unable to pass
+    # through it.
+    #
+    # Same construction as the pads and for the same reason: top level, kinematic, driven from the
+    # jaw frame each step.  A collider inside the articulation is what crashed Kit.
+    body_path = f"{root}/finger"
+    body = UsdGeom.Xform.Define(stage, Sdf.Path(body_path))
+    rb = _UP.RigidBodyAPI.Apply(body.GetPrim())
+    rb.CreateKinematicEnabledAttr(True)
+    _UP.MassAPI.Apply(body.GetPrim()).CreateMassAttr(0.006)
+    fx = UsdGeom.Xformable(body)
+    f_t = fx.AddTranslateOp()
+    f_o = fx.AddOrientOp()
+    f_o.Set(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
+    # A slab spanning pivot to tip, thin enough not to foul the object it is closing on.
+    fbox = add_box(stage, f"{body_path}/slab", (spec.jaw_tip_reach, 0.010, 0.006),
+                   (0.0, 0.0, 0.0), _JAW, collision=True)
+    bind_physics_material(fbox.GetPrim(), material)
+    # sign 0.0 marks it as "not a pad": driven from the jaw frame, not offset by the opening.
+    pads.append((f_t, f_o, 0.0, 0.5 * spec.jaw_tip_reach))
     return tuple(pads)
 
 
