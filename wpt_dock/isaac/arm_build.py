@@ -82,9 +82,10 @@ BRACKET_T = 0.0025                       # m, printed wall thickness
 
 #: Rotation about X that brings ``gripper.stl`` from its print pose to its assembled pose.
 #:
-#: **Zero**, on the user's direct instruction: "가장 평평한 부분이 하늘을 보게 하자" -- the flattest
-#: face points at the sky.  That face is the 92 x 29 mm plate at the jaw's far end, whose normal is
-#: the part's own Z, so it points up at zero rotation and nowhere useful at +-90.
+#: **+90**, on the user's instruction to turn the jaw 90 degrees so it reads as a pincer closing
+#: sideways ("가로로 집게 모양이 되도록").  At +90 about X the 8.20 mm horn bore stands vertical, so
+#: the finger swings in the horizontal plane and the two tips come together across the object --
+#: which is what a pincer does and what the fixed hook opposite it is shaped for.
 #:
 #: This settles something I could not settle by measuring, and it is worth being straight about why.
 #: The part has *two* flat regions with different normals -- the 2 mm blade around the bores (normal
@@ -94,14 +95,14 @@ BRACKET_T = 0.0025                       # m, printed wall thickness
 #:
 #: The rotation axis follows from it rather than being a separate choice: at zero rotation the
 #: 8.20 mm horn bore lies along **Y**, so the finger pitches about Y.  See ``JAW_AXIS``.
-JAW_ROT_X_DEG = 0.0
+JAW_ROT_X_DEG = 90.0
 
 #: Which axis the moving finger turns about, given ``JAW_ROT_X_DEG``.
 #:
-#: This is why the gripper's opening was invisible.  The bore is along Y in the assembled pose, but
-#: the code drove a ``RotateZ`` -- so the finger turned about an axis the mechanism does not have,
-#: and the motion read as nothing happening.  The axis has to be the one the hole is on.
-JAW_AXIS = "Y"
+#: The axis has to be the one the hole is on, or the motion is invisible -- which it was when the
+#: bore lay along Y and the code drove a ``RotateZ``.  At ``JAW_ROT_X_DEG`` = +90 the bore stands
+#: vertical, so ``Z`` is now the matching axis and the finger sweeps horizontally.
+JAW_AXIS = "Z"
 
 #: The gripper servo's position along ``gripper_upper_arm.stl``, in metres from that part's near
 #: end.  MEASURED: the part has two Z-axis bores at x = 69.50 and x = 97.97, spaced 28.47 mm, which
@@ -409,8 +410,11 @@ ARM_STL_PLACEMENT: dict[str, dict] = {
     # ``near_end`` puts the part's own min-x at the elbow, rather than centring it there.  Centred,
     # half of a 149 mm forearm hung *behind* the joint and the arm looked far too short for its
     # reach -- which is what the user reported.  A link starts at its joint.
+    # ``near_end`` is resolved below into "half the part's own length", so the near end lands on
+    # the joint.  A link starts at its joint; centring a 149 mm forearm on the elbow hung half of
+    # it behind the joint and made the arm look far too short for its reach.
     "fore_link": dict(frame="elbow", translate=("near_end", 0.0, 0.0),
-                      recenter_xy=False, recenter_z=True, zero_bottom=False, rot_x_deg=0.0),
+                      recenter_xy=True, recenter_z=True, zero_bottom=False, rot_x_deg=0.0),
 }
 
 
@@ -744,23 +748,29 @@ def build_arm(
             elif tx == "half_fore":
                 tx = 0.5 * spec.l_fore
             elif tx == "near_end":
-                tx = 0.0
-            # Offsets go through ``origin_mm`` -- into the vertices -- for the reason recorded in
-            # ``stl_mesh.add_stl_mesh``: an authored ``translate`` is not stored as given here.
-            # ``origin_mm`` is in the part's own frame *after* any rotation, which is where the
-            # measurements are taken, so the two cannot drift apart.
-            _lo, _hi = data.bounds
-            if place["translate"][0] == "near_end":
-                # A link starts at its joint: the part's near end goes on the frame, centred in y.
-                origin = (float(_lo[0]), 0.5 * float(_lo[1] + _hi[1]), 0.5 * float(_lo[2] + _hi[2]))
-            else:
-                origin = (0.5 * float(_lo[0] + _hi[0]) - tx * 1000.0,
-                          0.5 * float(_lo[1] + _hi[1]),
-                          float(_lo[2]) if place["zero_bottom"] else 0.5 * float(_lo[2] + _hi[2]))
+                # Half the part's own length, so its near end lands on the joint once the
+                # centring flags have put its middle at the origin.  Read from the rotated
+                # extent, since ``rot_x_deg`` can swap which axis is the length.
+                _lo, _hi = data.bounds
+                tx = 0.5 * float(_hi[0] - _lo[0]) * 0.001
+            # The centring flags, not ``origin_mm``, and the distinction matters.
+            # ``recenter_xy``/``recenter_z`` are computed inside ``add_stl_mesh`` from the bounds
+            # **after** the rotation, which is the frame the shift has to be in.  ``origin_mm`` is
+            # a raw point, so computing one here from ``data.bounds`` -- which are the *unrotated*
+            # bounds -- mixes frames: for a part with rot_x_deg = 90 the y and z components end up
+            # swapped and the mesh floats off to the side.  That is what happened to
+            # ``upper_link_stl``.  ``origin_mm`` earns its place only where a *measured feature*
+            # has to land on the origin, which is the jaw's bore and nothing else.
+            #
+            # An authored ``translate`` is fine after all: the earlier conclusion that it was
+            # untrustworthy was wrong, and the stale pivot line was doing that damage.
             mesh_path = f"{frames[place['frame']]}/{part}_stl"
             add_stl_mesh(
-                stage, mesh_path, data, scale=0.001, colour=_LINK,
-                rot_x_deg=place["rot_x_deg"], origin_mm=origin,
+                stage, mesh_path, data, scale=0.001,
+                translate=(tx, ty, place["translate"][2]),
+                colour=_LINK, recenter_xy=place["recenter_xy"],
+                recenter_z=place["recenter_z"], zero_bottom=place["zero_bottom"],
+                rot_x_deg=place["rot_x_deg"],
             )
             for stand_in in procedural.get(part, ()):
                 _hide(stage, stand_in)
