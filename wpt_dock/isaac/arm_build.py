@@ -524,19 +524,15 @@ def _mount_jaw_pair(stage, path: str, grip_path: str, spec: ArmSpec,
         piv = (piv_raw[0], -piv_raw[2], piv_raw[1])
     else:
         piv = piv_raw
-    # **Rotate the pivot with the mesh.**  ``add_stl_mesh`` turns the triangles by ``rot_x_deg``
-    # first and only then applies ``translate``, so a pivot measured in the file's own frame is in
-    # the wrong frame by the time it is used.  Under +90 degrees about X, (x, y, z) -> (x, -z, y).
-    # Skipping this put the jaw about 200 mm away from the robot -- it appeared to float in space,
-    # detached from the arm entirely, which is what the user saw.
-    piv = (piv_raw[0], -piv_raw[2], piv_raw[1])
     s = 0.001
     # ONE jaw, mounted once, on the moving frame.  The fixed half of the gripper is part of
     # ``gripper_upper_arm.stl`` and is already there as the forearm.
+    # ``origin_mm``, not ``translate``: the pivot is subtracted from the vertices, so nothing
+    # downstream can reinterpret it.  Authoring it as a transform put the jaw 290 mm out in y --
+    # measured in the built scene, after three attempts to fix it by adjusting the offset.
     add_stl_mesh(
         stage, f"{grip_path}/jaw_left/jaw_stl", data, scale=s,
-        translate=(-piv[0] * s, -piv[1] * s, -piv[2] * s),
-        colour=_JAW, rot_x_deg=JAW_ROT_X_DEG,
+        colour=_JAW, rot_x_deg=JAW_ROT_X_DEG, origin_mm=piv,
     )
     if notes is not None:
         notes.append(
@@ -748,18 +744,23 @@ def build_arm(
             elif tx == "half_fore":
                 tx = 0.5 * spec.l_fore
             elif tx == "near_end":
-                # Put the part's own near end on the joint.  Its y is centred at the same time,
-                # because a link that starts at its joint should also straddle it.
-                _lo, _hi = data.bounds
-                tx = -float(_lo[0]) * 0.001
-                ty = -0.5 * float(_lo[1] + _hi[1]) * 0.001
+                tx = 0.0
+            # Offsets go through ``origin_mm`` -- into the vertices -- for the reason recorded in
+            # ``stl_mesh.add_stl_mesh``: an authored ``translate`` is not stored as given here.
+            # ``origin_mm`` is in the part's own frame *after* any rotation, which is where the
+            # measurements are taken, so the two cannot drift apart.
+            _lo, _hi = data.bounds
+            if place["translate"][0] == "near_end":
+                # A link starts at its joint: the part's near end goes on the frame, centred in y.
+                origin = (float(_lo[0]), 0.5 * float(_lo[1] + _hi[1]), 0.5 * float(_lo[2] + _hi[2]))
+            else:
+                origin = (0.5 * float(_lo[0] + _hi[0]) - tx * 1000.0,
+                          0.5 * float(_lo[1] + _hi[1]),
+                          float(_lo[2]) if place["zero_bottom"] else 0.5 * float(_lo[2] + _hi[2]))
             mesh_path = f"{frames[place['frame']]}/{part}_stl"
             add_stl_mesh(
-                stage, mesh_path, data, scale=0.001,
-                translate=(tx, ty, place["translate"][2]),
-                colour=_LINK, recenter_xy=place["recenter_xy"],
-                recenter_z=place["recenter_z"], zero_bottom=place["zero_bottom"],
-                rot_x_deg=place["rot_x_deg"],
+                stage, mesh_path, data, scale=0.001, colour=_LINK,
+                rot_x_deg=place["rot_x_deg"], origin_mm=origin,
             )
             for stand_in in procedural.get(part, ()):
                 _hide(stage, stand_in)

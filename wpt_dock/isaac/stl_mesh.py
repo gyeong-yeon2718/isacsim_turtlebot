@@ -100,6 +100,7 @@ def add_stl_mesh(
     zero_bottom: bool = False,
     rot_x_deg: float = 0.0,
     mirror_y: bool = False,
+    origin_mm: tuple[float, float, float] | None = None,
 ) -> UsdGeom.Mesh:
     """Author the triangles as a ``UsdGeom.Mesh``.
 
@@ -148,6 +149,19 @@ def add_stl_mesh(
     if zero_bottom:
         shift[2] = -lo[2]
     tris = tris + shift
+
+    # Put a chosen point of the part on the prim's origin, by moving the **geometry** rather than
+    # by authoring a translate.
+    #
+    # This exists because the translate route is not trustworthy here: ``set_transform`` does not
+    # store the vector as given -- a jaw offset of (-0.1617, -0.1006, -0.1910) came back as
+    # (-0.1902, +0.1910, -0.0095), i.e. rotated 90 degrees about X -- so the mesh landed 290 mm
+    # away in y.  Three separate attempts to fix that by adjusting the offset failed, because the
+    # offset was never the thing that was wrong.  Subtracting the point from the vertices cannot
+    # be reinterpreted by anything downstream.  ``origin_mm`` is in the file's own units, applied
+    # after any rotation, so it is read straight off a measurement of the part.
+    if origin_mm is not None:
+        tris = tris - np.asarray(origin_mm, dtype=float) * float(scale)
 
     flat = tris.reshape(-1, 3)
     points = [Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in flat]
