@@ -61,16 +61,22 @@ class PickPlaceRunner(SimulationRunner):
 
         self.carry = GripperAttachment(stage, self.warehouse.payload_path,
                                        physical_grasp=self.run.physical_grasp)
-        if not self.run.physical_grasp:
-            # Only the kinematic carry needs this.  A kinematic body is infinitely massive in
-            # PhysX, so an unfiltered one swept into the robot's top plate and threw the whole
-            # articulation off the board -- that is why the filter exists.
-            #
-            # With a real grasp the payload is dynamic and cannot do that, and leaving the filter
-            # on is what made it pass *through* the plate: the user reported the box going
-            # straight through the deck, and a box that ignores the deck is not a physics result.
-            # Raising the plate would have hidden it rather than fixed it.
-            self.carry.exclude_from_collision_with(handles.prim_path)
+        # Payload-versus-robot collision is filtered, and this is a **known compromise** rather
+        # than a settled design.  Both states have been run and both are wrong in different ways:
+        #
+        #   filtered   the box passes through the printed top plate, which the user saw and which
+        #              is plainly not physics
+        #   unfiltered the box jams against the robot somewhere and tips the whole TurtleBot over,
+        #              and the run time goes from 33 s to 73 s fighting the contact
+        #
+        # Filtered is the one that leaves a usable simulation, so it is what ships until the jam
+        # is located.  What the jam is *not*: the carry trajectory.  Measured with the current
+        # geometry, the payload clears the plate by 130-162 mm along the whole lift-slew-carry
+        # path, so widening that clearance would fix nothing.  The contact is at the pick or the
+        # place moment, or against a robot part that is not the plate -- the rear rack and the
+        # battery box are the candidates, and locating it wants the placement probe pointed at the
+        # payload through the grasp rather than another guess.
+        self.carry.exclude_from_collision_with(handles.prim_path)
         # Spawned 1 mm clear of the rollers rather than exactly in contact.  The payload is a
         # dynamic body now, so it drops that millimetre in about 14 ms and is at rest long
         # before the arm arrives at t = 4.4 s -- and starting a body in exact surface contact
