@@ -61,7 +61,16 @@ class PickPlaceRunner(SimulationRunner):
 
         self.carry = GripperAttachment(stage, self.warehouse.payload_path,
                                        physical_grasp=self.run.physical_grasp)
-        self.carry.exclude_from_collision_with(handles.prim_path)
+        if not self.run.physical_grasp:
+            # Only the kinematic carry needs this.  A kinematic body is infinitely massive in
+            # PhysX, so an unfiltered one swept into the robot's top plate and threw the whole
+            # articulation off the board -- that is why the filter exists.
+            #
+            # With a real grasp the payload is dynamic and cannot do that, and leaving the filter
+            # on is what made it pass *through* the plate: the user reported the box going
+            # straight through the deck, and a box that ignores the deck is not a physics result.
+            # Raising the plate would have hidden it rather than fixed it.
+            self.carry.exclude_from_collision_with(handles.prim_path)
         # Spawned 1 mm clear of the rollers rather than exactly in contact.  The payload is a
         # dynamic body now, so it drops that millimetre in about 14 ms and is at rest long
         # before the arm arrives at t = 4.4 s -- and starting a body in exact surface contact
