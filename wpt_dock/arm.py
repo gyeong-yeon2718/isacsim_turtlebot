@@ -71,17 +71,27 @@ class ArmSpec:
     # made the arm look far too short for what it could reach -- the user's report.  Taking the
     # measurement as primary and letting the total follow is the right way round: the part is a
     # fact and the total is its consequence.
-    l_fore: float = 0.0778           # m, elbow -> gripper servo horn axis
+    # The user measured it: elbow pivot to the shut jaw tips is 110-130 mm, not the 147.9 mm the
+    # STL-derived chain gave.  120 mm is the middle of their range and it is also the documented
+    # LENGTH_ELBOW_GRIPPER, so two independent sources now agree and the third -- my reading of the
+    # flange bores -- is the one that was wrong.  Most likely the elbow does not bolt to the very
+    # end of gripper_upper_arm.stl, which is what I had assumed; ~28 mm of the part sits behind the
+    # joint.  ``l_fore`` follows from the measurement and the jaw, rather than the other way round.
+    ELBOW_TO_TOOL: float = 0.120     # m, MEASURED by the user
+
+    @property
+    def l_fore(self) -> float:
+        """Elbow -> gripper servo horn.  What the measured total leaves after the jaw's reach."""
+        return self.ELBOW_TO_TOOL - self.jaw_tip_reach
 
     @property
     def elbow_to_tool(self) -> float:
         """Elbow -> the point the gripper applies force.  Derived from the two measured parts.
 
-        NOTE this comes to about 148 mm, which exceeds the "under 120 mm" the user gave earlier.
-        The two cannot both be right, and the conflict is left visible rather than split the
-        difference: the 120 mm came from reading the documented ``LENGTH_ELBOW_GRIPPER``, while
-        this comes from the flange bores in one part and the horn bore in the other, which agree
-        with each other.  One measurement settles it -- elbow pivot to the shut jaw tips.
+        Resolved: the user measured 110-130 mm on the built arm, so ``ELBOW_TO_TOOL`` is the
+        primary and this is its echo.  The earlier 147.9 mm came from assuming the elbow bolts to
+        the very end of ``gripper_upper_arm.stl``; it does not, and about 28 mm of that part sits
+        behind the joint.
         """
         return self.l_fore + self.l_tool
     reach_min: float = 0.030         # m, MEASURED (documented usable minimum)

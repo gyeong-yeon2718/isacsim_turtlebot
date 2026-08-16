@@ -700,8 +700,9 @@ class TestArm(unittest.TestCase):
         # reach, which is evidence for the parts.  So the horizontal figure follows the parts, and
         # this asserts the relationship rather than either published number.
         self.assertAlmostEqual(tip[0], self.spec.l_fore + self.spec.l_tool, places=9)
-        self.assertGreater(tip[0], 0.120,
-                           "if this drops back under 12 cm the sources have been reconciled")
+        self.assertAlmostEqual(tip[0], 0.120, places=9,
+                               msg="reconciled: the user's measurement agrees with the "
+                                   "documented 12 cm, so HOME's horizontal figure matches again")
 
     def test_ik_inverts_fk_over_the_workspace(self):
         from wpt_dock.arm import forward_kinematics, solve_ik
@@ -945,9 +946,12 @@ class TestArm(unittest.TestCase):
         self.assertAlmostEqual(s.distal, s.elbow_to_tool, places=12)
         self.assertAlmostEqual(s.elbow_to_tool, s.l_fore + s.l_tool, places=12)
         self.assertGreater(s.l_fore, 0.0, "the forearm cannot be shorter than the jaw it carries")
-        self.assertGreater(s.distal, 0.120,
-                           "measured geometry exceeds the documented 12 cm -- if this ever drops "
-                           "back under, the two sources have been reconciled and this note is stale")
+        # Reconciled.  The user measured 110-130 mm on the built arm, which agrees with the
+        # documented LENGTH_ELBOW_GRIPPER of 12 cm; the 147.9 mm this used to assert came from my
+        # assuming the elbow bolts to the very end of gripper_upper_arm.stl, and it does not.
+        self.assertAlmostEqual(s.elbow_to_tool, 0.120, places=9)
+        self.assertTrue(0.110 <= s.distal <= 0.130,
+                        f"must sit in the measured 110-130 mm band, got {s.distal * 1000:.1f} mm")
 
         # The tool centre point is the tip contact, not a number near the wrist.  This is the
         # "force application point" the user kept reporting as wrong: the IK aims at l_tool, so if

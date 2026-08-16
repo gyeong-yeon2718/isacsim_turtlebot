@@ -82,10 +82,10 @@ BRACKET_T = 0.0025                       # m, printed wall thickness
 
 #: Rotation about X that brings ``gripper.stl`` from its print pose to its assembled pose.
 #:
-#: **+90**, on the user's instruction to turn the jaw 90 degrees so it reads as a pincer closing
-#: sideways ("가로로 집게 모양이 되도록").  At +90 about X the 8.20 mm horn bore stands vertical, so
-#: the finger swings in the horizontal plane and the two tips come together across the object --
-#: which is what a pincer does and what the fixed hook opposite it is shaped for.
+#: **-90**, which is +90 flipped top for bottom, as the user asked.  Either sign stands the 8.20 mm
+#: horn bore vertical -- so the pincer still closes sideways and ``JAW_AXIS`` stays Z -- and the
+#: only difference between them is which way up the part sits.  That is precisely why the sign has
+#: been wrong more than once: nothing in the mesh distinguishes them, only the assembly does.
 #:
 #: This settles something I could not settle by measuring, and it is worth being straight about why.
 #: The part has *two* flat regions with different normals -- the 2 mm blade around the bores (normal
@@ -95,7 +95,7 @@ BRACKET_T = 0.0025                       # m, printed wall thickness
 #:
 #: The rotation axis follows from it rather than being a separate choice: at zero rotation the
 #: 8.20 mm horn bore lies along **Y**, so the finger pitches about Y.  See ``JAW_AXIS``.
-JAW_ROT_X_DEG = 90.0
+JAW_ROT_X_DEG = -90.0
 
 #: Which axis the moving finger turns about, given ``JAW_ROT_X_DEG``.
 #:
@@ -454,7 +454,12 @@ def build_pad_bodies(stage, spec: ArmSpec, root: str = "/World/gripper_pads") ->
     UsdGeom.Xform.Define(stage, Sdf.Path(root))
     material = add_physics_material(stage, "/World/Looks/PhysicsJaw", 0.95, 0.85)
     pads = []
-    pad_x = 0.021          # matches the procedural pad's centre in the gripper frame
+    # The pads go where the jaws close, which is the tool centre point -- not a fixed 21 mm, which
+    # is what this was and which came from the old procedural gripper.  With the jaw's real reach
+    # measured at 70.1 mm the pads were sitting 49 mm short of the payload, so they closed on
+    # nothing: the mission ran clean and simply left the box on the conveyor.  Deriving it from
+    # ``spec`` means the pads follow the gripper's geometry whenever that is corrected again.
+    pad_x = spec.l_tool
     for tag, sign in (("left", +1.0), ("right", -1.0)):
         body_path = f"{root}/{tag}"
         body = UsdGeom.Xform.Define(stage, Sdf.Path(body_path))

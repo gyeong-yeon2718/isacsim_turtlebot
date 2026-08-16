@@ -64,10 +64,15 @@ class RunConfig:
     # pick-and-place runner passes it to ``build_arm``, which falls back to procedural geometry
     # for any part it cannot find.
     arm_stl_dir: str | None = None
-    # Contact-and-friction grasp instead of a kinematic carry.  Off because it does not work yet:
-    # with the pad bodies present PhysX dies on the first physics step.  See
-    # ``arm_build.build_pad_bodies`` for what was ruled out and what is left to try.
-    physical_grasp: bool = False
+    # Contact-and-friction grasp instead of a kinematic carry.  **On.**
+    #
+    # It was off because "PhysX dies on the first physics step with the pad bodies present", and
+    # that diagnosis was wrong: ``tools/probe_friction_grasp.py`` builds the same mechanism in a
+    # bare scene -- two top-level kinematic pads squeezing a dynamic 25 mm box -- and it runs six
+    # hundred steps clean, lifts the box 120 mm and holds it on default friction with no tuning.
+    # The crash was the collider that had been put *inside the articulation*, which is a separate
+    # bug and is fixed.
+    physical_grasp: bool = True
     log_path: str | None = None
     verbose: bool = True
 
