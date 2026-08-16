@@ -229,10 +229,10 @@ class ArmSpec:
     # at the very ends of its fingers; the fingers reach past the object so it is cradled between
     # them.  Half the payload plus 2 mm puts the whole cube inside the jaws with the tips just
     # beyond it, which is how you would actually pick something up with these.
-    # = PAYLOAD_HALF (12.5) + 2 mm.  Spelled out rather than referenced because ``PAYLOAD_SIZE``
+    # = PAYLOAD_HALF (7.0) + 2 mm.  Spelled out rather than referenced because ``PAYLOAD_SIZE``
     # is defined below this class; ``test_the_payload_fits_between_the_jaws`` ties the two together
     # so they cannot drift apart silently.
-    grip_depth: float = 0.0145        # m
+    grip_depth: float = 0.0090        # m
 
     def jaw_rotation(self, opening: float) -> float:
         """Angle the **single** moving jaw is swung open, for a servo angle.  Zero is shut.
@@ -297,7 +297,22 @@ class ArmSpec:
 # rather than in the USD scene module: it is a *specification* constrained by the hardware, and
 # putting it behind a ``pxr`` import meant the tests could not reference it and hardcoded 17.5 mm
 # instead -- which then silently disagreed with the scene.
-PAYLOAD_SIZE = 0.025             # m, cube edge.  Must lie strictly inside the jaws' travel.
+# The cube edge, bounded in **three** directions, and the binding one is not the obvious one.
+#
+#   between the pads   the jaws' usable gap runs 2..30 mm
+#   vertically         the gripper bar is 23 mm tall
+#   across the bar     the gripper bar is **19 mm** wide  <- this is the tight one
+#
+# The jaw gap is the number that looks like the constraint and is not: the object is only ever
+# between the pads for the width of the pads themselves, while the bar is what it sits against
+# along its whole length.  25 mm cleared the gap and stuck out everywhere else; 18 mm cleared the
+# gap and the height and still showed sideways, because 18 against a 19 mm bar leaves half a
+# millimetre.  14 mm is inside all three: 8 mm a side in the gap, 4.5 mm above and below, and
+# 2.5 mm each side across the bar.
+#
+# Sizing the payload to the smallest dimension of the thing holding it, rather than to the widest
+# opening, is the rule this took three tries to arrive at.
+PAYLOAD_SIZE = 0.014             # m, cube edge
 PAYLOAD_MASS = 0.040             # kg, a light printed/cardboard box an SG90 could lift
 PAYLOAD_HALF = 0.5 * PAYLOAD_SIZE
 
